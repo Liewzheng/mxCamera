@@ -74,9 +74,13 @@ static void check_display_config(void);
 
 // 图像处理和缩放
 static void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height);
-static void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data, 
-                                   int src_width, int src_height,
-                                   int dst_width, int dst_height);
+static void unpack_sbggr10_scalar(const uint8_t raw_bytes[5], uint16_t pixels[4]);
+static int unpack_sbggr10_image(const uint8_t *raw_data, size_t raw_size, 
+                               uint16_t *output_pixels, int width, int height);
+static void scale_pixels(const uint16_t* src_pixels, int src_width, int src_height,
+                        uint16_t* dst_pixels, int dst_width, int dst_height);
+static void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_data,
+                                    int width, int height);
 static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
                               uint16_t* dst_buffer);
 
@@ -224,20 +228,90 @@ static void update_fps(void) {
 }
 
 /**
- * @brief RAW10 到 RGB565 转换 (简化版本)
- * @param raw_data RAW10 数据
- * @param rgb_data 输出 RGB565 数据
+ * @brief SBGGR10格式数据解包（标量版本）- 参考v4l2_bench实现
+ * @param raw_bytes 5字节的RAW10数据（包含4个像素）
+ * @param pixels 输出的4个16位像素值
+ */
+static void unpack_sbggr10_scalar(const uint8_t raw_bytes[5], uint16_t pixels[4]) {
+    // 重构40位数据
+    uint64_t combined = ((uint64_t)raw_bytes[4] << 32) |
+                       ((uint64_t)raw_bytes[3] << 24) |
+                       ((uint64_t)raw_bytes[2] << 16) |
+                       ((uint64_t)raw_bytes[1] << 8)  |
+                        (uint64_t)raw_bytes[0];
+    
+    // 提取4个10位像素值（小端序，从低位开始）
+    pixels[0] = (uint16_t)((combined >>  0) & 0x3FF);
+    pixels[1] = (uint16_t)((combined >> 10) & 0x3FF);
+    pixels[2] = (uint16_t)((combined >> 20) & 0x3FF);
+    pixels[3] = (uint16_t)((combined >> 30) & 0x3FF);
+}
+
+/**
+ * @brief SBGGR10图像数据完整解包函数
+ * @param raw_data 输入的RAW10数据
+ * @param raw_size RAW10数据大小（字节）
+ * @param output_pixels 输出的16位像素数组
+ * @param width 图像宽度
+ * @param height 图像高度
+ * @return 0成功，-1失败
+ */
+static int unpack_sbggr10_image(const uint8_t *raw_data, size_t raw_size, 
+                               uint16_t *output_pixels, int width, int height) {
+    if (!raw_data || !output_pixels || raw_size == 0) {
+        return -1;
+    }
+    
+    // 验证数据大小（必须是5的倍数）
+    if (raw_size % 5 != 0) {
+        printf("Error: RAW data size (%zu) must be multiple of 5\n", raw_size);
+        return -1;
+    }
+    
+    size_t expected_pixels = width * height;
+    size_t available_pixels = raw_size / 5 * 4;
+    
+    if (available_pixels < expected_pixels) {
+        printf("Warning: Not enough RAW data (%zu pixels available, %zu expected)\n", 
+               available_pixels, expected_pixels);
+    }
+    
+    // 解包RAW10数据
+    size_t raw_pos = 0;
+    size_t pixel_pos = 0;
+    size_t max_pixels = (available_pixels < expected_pixels) ? available_pixels : expected_pixels;
+    
+    while (raw_pos + 5 <= raw_size && pixel_pos + 4 <= max_pixels) {
+        uint16_t pixels[4];
+        unpack_sbggr10_scalar(raw_data + raw_pos, pixels);
+        
+        // 复制像素数据，注意边界检查
+        for (int i = 0; i < 4 && pixel_pos < max_pixels; i++) {
+            output_pixels[pixel_pos++] = pixels[i];
+        }
+        
+        raw_pos += 5;
+    }
+    
+    // 填充剩余像素（如果有）
+    while (pixel_pos < expected_pixels) {
+        output_pixels[pixel_pos++] = 0;
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 16位像素数据缩放到目标尺寸
+ * @param src_pixels 源16位像素数据
  * @param src_width 源图像宽度
  * @param src_height 源图像高度
+ * @param dst_pixels 目标16位像素数据
  * @param dst_width 目标图像宽度
  * @param dst_height 目标图像高度
  */
-static void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data, 
-                            int src_width, int src_height,
-                            int dst_width, int dst_height) {
-    // 简化的 RAW10 转换：只取高8位，当作灰度
-    // 实际应用中需要完整的 demosaic 算法
-    
+static void scale_pixels(const uint16_t* src_pixels, int src_width, int src_height,
+                        uint16_t* dst_pixels, int dst_width, int dst_height) {
     float x_ratio = (float)src_width / dst_width;
     float y_ratio = (float)src_height / dst_height;
     
@@ -246,42 +320,36 @@ static void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data,
             int src_x = (int)(x * x_ratio);
             int src_y = (int)(y * y_ratio);
             
-            // RAW10 格式：每5个字节包含4个像素
-            int pixel_idx = src_y * src_width + src_x;
-            int byte_idx = (pixel_idx / 4) * 5;
-            int pixel_in_group = pixel_idx % 4;
+            // 边界检查
+            if (src_x >= src_width) src_x = src_width - 1;
+            if (src_y >= src_height) src_y = src_height - 1;
             
-            uint16_t raw_value;
+            int src_idx = src_y * src_width + src_x;
+            int dst_idx = y * dst_width + x;
             
-            if (byte_idx + 4 < src_width * src_height * 5 / 4) {
-                switch (pixel_in_group) {
-                    case 0:
-                        raw_value = (raw_data[byte_idx] << 2) | ((raw_data[byte_idx + 4] >> 0) & 0x03);
-                        break;
-                    case 1:
-                        raw_value = (raw_data[byte_idx + 1] << 2) | ((raw_data[byte_idx + 4] >> 2) & 0x03);
-                        break;
-                    case 2:
-                        raw_value = (raw_data[byte_idx + 2] << 2) | ((raw_data[byte_idx + 4] >> 4) & 0x03);
-                        break;
-                    case 3:
-                        raw_value = (raw_data[byte_idx + 3] << 2) | ((raw_data[byte_idx + 4] >> 6) & 0x03);
-                        break;
-                    default:
-                        raw_value = 0;
-                }
-            } else {
-                raw_value = 0;
-            }
-            
-            // 转换为8位灰度值
-            uint8_t gray = (uint8_t)(raw_value >> 2);
-            
-            // 转换为 RGB565 (灰度图)
-            uint16_t rgb565 = ((gray >> 3) << 11) | ((gray >> 2) << 5) | (gray >> 3);
-            
-            rgb_data[y * dst_width + x] = rgb565;
+            dst_pixels[dst_idx] = src_pixels[src_idx];
         }
+    }
+}
+
+/**
+ * @brief 16位像素转换为RGB565格式
+ * @param pixels 输入的16位像素数据（10位有效值）
+ * @param rgb565_data 输出的RGB565数据
+ * @param width 图像宽度
+ * @param height 图像高度
+ */
+static void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_data,
+                                    int width, int height) {
+    int total_pixels = width * height;
+    
+    for (int i = 0; i < total_pixels; i++) {
+        // 将10位值转换为8位灰度值
+        uint8_t gray = (uint8_t)(pixels[i] >> 2);
+        
+        // 转换为 RGB565 (灰度图)
+        uint16_t rgb565 = ((gray >> 3) << 11) | ((gray >> 2) << 5) | (gray >> 3);
+        rgb565_data[i] = rgb565;
     }
 }
 
@@ -333,10 +401,13 @@ static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int sr
 }
 
 /**
- * @brief 更新图像显示 (使用高效横屏适配)
+ * @brief 更新图像显示 (使用正确的SBGGR10解包和缩放，优化性能)
  */
 static void update_image_display(void) {
-    pthread_mutex_lock(&frame_mutex);
+    // 使用非阻塞锁尝试，避免阻塞按键处理
+    if (pthread_mutex_trylock(&frame_mutex) != 0) {
+        return; // 如果无法获取锁，跳过本次更新
+    }
     
     if (frame_available && current_frame.data && img_canvas) {
         // 计算动态缩放尺寸
@@ -348,17 +419,38 @@ static void update_image_display(void) {
         current_img_width = scaled_width;
         current_img_height = scaled_height;
         
-        // 创建图像处理缓冲区
-        static uint16_t scaled_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
-        static uint16_t display_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+        // 创建图像处理缓冲区 (静态分配，避免重复分配)
+        static uint16_t unpacked_buffer[CAMERA_WIDTH * CAMERA_HEIGHT]; // 原始尺寸解包缓冲区
+        static uint16_t scaled_pixels[DISPLAY_WIDTH * DISPLAY_HEIGHT];  // 缩放后的像素缓冲区
+        static uint16_t scaled_rgb565[DISPLAY_WIDTH * DISPLAY_HEIGHT];  // RGB565缓冲区
+        static uint16_t display_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT]; // 最终显示缓冲区
+        static int last_processed_width = 0, last_processed_height = 0;
         
-        // 第一步：RAW10 转换到 RGB565 (缩放到目标尺寸)
-        convert_raw10_to_rgb565((const uint8_t*)current_frame.data, scaled_buffer,
-                               current_frame.width, current_frame.height,
-                               scaled_width, scaled_height);
+        // 只在尺寸变化时打印处理信息
+        if (current_frame.width != last_processed_width || current_frame.height != last_processed_height) {
+            printf("Processing frame: %dx%d -> %dx%d\n", 
+                   current_frame.width, current_frame.height, scaled_width, scaled_height);
+            last_processed_width = current_frame.width;
+            last_processed_height = current_frame.height;
+        }
         
-        // 第二步：横屏适配 (居中显示到全屏缓冲区)
-        if (landscape_image_fit(scaled_buffer, scaled_width, scaled_height, display_buffer) == 0) {
+        // 第一步：SBGGR10 解包到原始尺寸的16位像素数据
+        if (unpack_sbggr10_image((const uint8_t*)current_frame.data, current_frame.size,
+                                unpacked_buffer, current_frame.width, current_frame.height) != 0) {
+            printf("Error: Failed to unpack SBGGR10 data\n");
+            pthread_mutex_unlock(&frame_mutex);
+            return;
+        }
+        
+        // 第二步：缩放到目标尺寸
+        scale_pixels(unpacked_buffer, current_frame.width, current_frame.height,
+                    scaled_pixels, scaled_width, scaled_height);
+        
+        // 第三步：转换为RGB565格式
+        convert_pixels_to_rgb565(scaled_pixels, scaled_rgb565, scaled_width, scaled_height);
+        
+        // 第四步：横屏适配 (居中显示到全屏缓冲区)
+        if (landscape_image_fit(scaled_rgb565, scaled_width, scaled_height, display_buffer) == 0) {
             // 创建 LVGL 图像描述符
             static lv_img_dsc_t img_dsc;
             img_dsc.header.always_zero = 0;
@@ -381,8 +473,11 @@ static void update_image_display(void) {
                 lv_label_set_text(info_label, info_text);
             }
             
-            printf("Image updated: %dx%d -> %dx%d (landscape fit)\n", 
-                   current_frame.width, current_frame.height, scaled_width, scaled_height);
+            // 只在尺寸变化时打印成功信息
+            if (current_frame.width != last_processed_width || current_frame.height != last_processed_height) {
+                printf("Image updated: %dx%d -> %dx%d (SBGGR10 properly unpacked)\n", 
+                       current_frame.width, current_frame.height, scaled_width, scaled_height);
+            }
         } else {
             printf("Error: Failed to fit image for landscape display\n");
         }
@@ -453,12 +548,25 @@ static void* camera_thread(void* arg) {
 // ============================================================================
 
 /**
- * @brief 处理按键输入
+ * @brief 处理按键输入 (优化响应速度)
  */
 static void handle_keys(void) {
     static int last_key0_state = 1;
     static int key0_debounce_count = 0;
-    const int debounce_threshold = 5;
+    static struct timeval last_key_check = {0};
+    const int debounce_threshold = 3; // 降低去抖动阈值，提高响应速度
+    
+    // 限制按键检查频率，但保持足够的响应速度
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    long time_since_last_check = (current_time.tv_sec - last_key_check.tv_sec) * 1000000 +
+                                (current_time.tv_usec - last_key_check.tv_usec);
+    
+    // 每1ms检查一次按键状态
+    if (time_since_last_check < 1000) {
+        return;
+    }
+    last_key_check = current_time;
     
     // 读取 KEY0 状态
     int current_key0 = GET_KEY0;
@@ -473,7 +581,8 @@ static void handle_keys(void) {
                 // 按键按下事件
                 camera_paused = !camera_paused;
                 
-                printf("Camera %s\n", camera_paused ? "PAUSED" : "RESUMED");
+                printf("Camera %s (Key response time optimized)\n", 
+                       camera_paused ? "PAUSED" : "RESUMED");
                 
                 // 更新状态显示
                 if (status_label) {
@@ -653,33 +762,52 @@ int main(void) {
     printf("Display: 320x240 (forced landscape mode)\n");
     printf("Camera: %dx%d (RAW10)\n", CAMERA_WIDTH, CAMERA_HEIGHT);
     printf("Scaling: Width-aligned to 320px, maintaining aspect ratio\n");
-    printf("Example scaling:\n");
-    printf("  1920x1080 -> 320x180 (16:9)\n");
-    printf("  1600x1200 -> 320x240 (4:3)\n");
-    printf("  1280x720  -> 320x180 (16:9)\n");
+    printf("Performance optimizations enabled:\n");
+    printf("  - Display update rate limited to 30 FPS\n");
+    printf("  - Non-blocking frame mutex for better key response\n");
+    printf("  - Optimized key debouncing (3 samples)\n");
+    printf("  - Reduced debug output for better performance\n");
     printf("Controls:\n");
     printf("  KEY0 (PIN %d) - Pause/Resume camera\n", KEY0_PIN);
     printf("  Ctrl+C - Exit\n");
     
     // 主循环
+    uint32_t loop_count = 0;
+    struct timeval last_display_update = {0};
+    gettimeofday(&last_display_update, NULL);
+    
     while (!exit_flag) {
-        // 处理 LVGL 任务
+        struct timeval current_time;
+        gettimeofday(&current_time, NULL);
+        
+        // 处理 LVGL 任务 (高优先级，每次循环都执行)
         lv_timer_handler();
         
         // 再次检查退出标志
         if (exit_flag) break;
         
-        // 处理按键
+        // 处理按键 (高优先级，每次循环都执行)
         handle_keys();
         
         // 再次检查退出标志
         if (exit_flag) break;
         
-        // 更新图像显示
-        update_image_display();
+        // 限制图像显示更新频率到30FPS (33ms间隔)
+        long display_time_diff = (current_time.tv_sec - last_display_update.tv_sec) * 1000000 +
+                                (current_time.tv_usec - last_display_update.tv_usec);
         
-        // 短暂休眠
-        usleep(5000); // 5ms
+        if (display_time_diff >= 33333) { // 30 FPS = 33.33ms
+            update_image_display();
+            last_display_update = current_time;
+        }
+        
+        // 动态休眠时间：降低CPU占用
+        loop_count++;
+        if (loop_count % 10 == 0) {
+            usleep(10000); // 每10次循环休眠10ms
+        } else {
+            usleep(1000);  // 其他时候休眠1ms
+        }
     }
     
     printf("Main loop exited, shutting down...\n");
