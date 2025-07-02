@@ -63,9 +63,9 @@
 #define LCD_MOSI_PIN    50     // SPI 数据输出
 #define LCD_MISO_PIN    9      // SPI 数据输入 (可选)
 
-// LCD 规格定义
-#define LCD_WIDTH       240    // LCD 宽度
-#define LCD_HEIGHT      320    // LCD 高度
+// LCD 规格定义 (横屏模式)
+#define LCD_WIDTH       320    // LCD 宽度 (横屏)
+#define LCD_HEIGHT      240    // LCD 高度 (横屏)
 
 // LCD 控制宏定义
 #define LCD_CS(x)       DEV_Digital_Write(LCD_CS_PIN, x)

@@ -55,6 +55,11 @@ set(LIBMEDIA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libMedia")
 set(LIBMEDIA_INCLUDE_DIR "${LIBMEDIA_DIR}/include")
 set(LIBMEDIA_LIB_DIR "${LIBMEDIA_DIR}/build")
 
+# libstaging 路径 (fbtft_benchmark 库)
+set(LIBSTAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../fbtft_benchmark")
+set(LIBSTAGING_INCLUDE_DIR "${LIBSTAGING_DIR}/include")
+set(LIBSTAGING_LIB_DIR "${LIBSTAGING_DIR}/build/lib")
+
 # LVGL 路径
 set(LVGL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../lvgl")
 set(LVGL_DIR "${LVGL_ROOT}/lvgl")
@@ -99,6 +104,21 @@ if(NOT LIBMEDIA_LIBRARY)
     message(FATAL_ERROR "libMedia library not found in ${LIBMEDIA_LIB_DIR}")
 endif()
 
+# 检查 libstaging
+if(NOT EXISTS "${LIBSTAGING_INCLUDE_DIR}/fbtft_lcd.h")
+    message(FATAL_ERROR "libstaging header not found at ${LIBSTAGING_INCLUDE_DIR}")
+endif()
+
+find_library(LIBSTAGING_LIBRARY 
+    NAMES staging
+    PATHS ${LIBSTAGING_LIB_DIR}
+    NO_DEFAULT_PATH
+)
+
+if(NOT LIBSTAGING_LIBRARY)
+    message(FATAL_ERROR "libstaging library not found in ${LIBSTAGING_LIB_DIR}")
+endif()
+
 # 检查 LVGL
 if(NOT EXISTS "${LVGL_DIR}")
     message(FATAL_ERROR "LVGL library not found at ${LVGL_DIR}")
@@ -126,6 +146,7 @@ include_directories(
     ${PROJECT_INCLUDE_DIR}
     ${LIBGPIO_INCLUDE_DIR}
     ${LIBMEDIA_INCLUDE_DIR}
+    ${LIBSTAGING_INCLUDE_DIR}
     ${LVGL_DIR}
     ${LVGL_DRIVERS_DIR}
     ${LVGL_ROOT}
@@ -168,6 +189,13 @@ set_target_properties(media PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES ${LIBMEDIA_INCLUDE_DIR}
 )
 
+# libstaging
+add_library(staging SHARED IMPORTED)
+set_target_properties(staging PROPERTIES
+    IMPORTED_LOCATION ${LIBSTAGING_LIBRARY}
+    INTERFACE_INCLUDE_DIRECTORIES ${LIBSTAGING_INCLUDE_DIR}
+)
+
 # LVGL
 add_library(lvgl SHARED IMPORTED)
 set_target_properties(lvgl PROPERTIES
@@ -192,6 +220,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PROJECT_INCLUDE_DIR}
     ${LIBGPIO_INCLUDE_DIR}
     ${LIBMEDIA_INCLUDE_DIR}
+    ${LIBSTAGING_INCLUDE_DIR}
     ${LVGL_DIR}
     ${LVGL_DRIVERS_DIR}
     ${LVGL_ROOT}
@@ -201,6 +230,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} 
     gpio      # libgpio 动态库
     media     # libMedia 动态库
+    staging   # libstaging 动态库 (fbtft_benchmark)
     lvgl      # LVGL 动态库
     m         # 数学库
     pthread   # 线程库
@@ -241,6 +271,7 @@ add_custom_target(info
     COMMAND ${CMAKE_COMMAND} -E echo "输出目录: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
     COMMAND ${CMAKE_COMMAND} -E echo "libgpio: ${LIBGPIO_LIBRARY}"
     COMMAND ${CMAKE_COMMAND} -E echo "libMedia: ${LIBMEDIA_LIBRARY}"
+    COMMAND ${CMAKE_COMMAND} -E echo "libstaging: ${LIBSTAGING_LIBRARY}"
     COMMAND ${CMAKE_COMMAND} -E echo "LVGL: ${LVGL_LIBRARY}"
     COMMENT "显示项目信息"
 )
@@ -253,6 +284,7 @@ add_custom_target(deploy
     COMMAND ${CMAKE_COMMAND} -E echo "   scp ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/mxCamera root@<target_ip>:~/"
     COMMAND ${CMAKE_COMMAND} -E echo "   scp ${LIBGPIO_LIBRARY} root@<target_ip>:/usr/lib/"
     COMMAND ${CMAKE_COMMAND} -E echo "   scp ${LIBMEDIA_LIBRARY} root@<target_ip>:/usr/lib/"
+    COMMAND ${CMAKE_COMMAND} -E echo "   scp ${LIBSTAGING_LIBRARY} root@<target_ip>:/usr/lib/"
     COMMAND ${CMAKE_COMMAND} -E echo "   scp ${LVGL_LIBRARY} root@<target_ip>:/usr/lib/"
     COMMAND ${CMAKE_COMMAND} -E echo "2. 在目标设备上运行:"
     COMMAND ${CMAKE_COMMAND} -E echo "   export LD_LIBRARY_PATH=/usr/lib:\$LD_LIBRARY_PATH"
@@ -284,5 +316,6 @@ message(STATUS "版本: ${PROJECT_VERSION}")
 message(STATUS "编译类型: ${CMAKE_BUILD_TYPE}")
 message(STATUS "libgpio: ${LIBGPIO_LIBRARY}")
 message(STATUS "libMedia: ${LIBMEDIA_LIBRARY}")
+message(STATUS "libstaging: ${LIBSTAGING_LIBRARY}")
 message(STATUS "LVGL: ${LVGL_LIBRARY}")
 message(STATUS "输出目录: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")

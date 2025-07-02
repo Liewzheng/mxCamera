@@ -12,6 +12,7 @@
  * - libgpio.so (GPIO控制)
  * - libmedia.so (摄像头采集) 
  * - liblvgl.so (图形界面)
+ * - libstaging.so (图像处理，来自 fbtft_benchmark)
  */
 
 #include <pthread.h>
@@ -30,12 +31,13 @@
 #include "DEV_Config.h"
 #include "lv_drivers/display/fbdev.h"
 #include "lvgl/lvgl.h"
+#include "fbtft_lcd.h"
 
 // ============================================================================
 // 系统配置常量
 // ============================================================================
 
-#define DISP_BUF_SIZE (240 * 320)
+#define DISP_BUF_SIZE (320 * 240)
 
 // 摄像头配置
 #define CAMERA_WIDTH 1920
@@ -44,12 +46,42 @@
 #define CAMERA_DEVICE "/dev/video0"
 #define BUFFER_COUNT 4
 
-// 显示配置
-#define DISPLAY_WIDTH 240
-#define DISPLAY_HEIGHT 320
+// 显示配置 (横屏模式)
+#define DISPLAY_WIDTH 320
+#define DISPLAY_HEIGHT 240
 
-// 帧率统计配置
+// 动态图像尺寸 (根据摄像头宽高比计算)
+static int current_img_width = 320;
+static int current_img_height = 240;
+
+// 帧率统计配置 (重新定义以避免冲突)
+#undef FPS_UPDATE_INTERVAL
 #define FPS_UPDATE_INTERVAL 1000000 // 1秒 (微秒)
+
+// ============================================================================
+// 函数声明
+// ============================================================================
+
+// 信号处理和系统配置
+static void signal_handler(int sig);
+static void check_display_config(void);
+
+// 图像处理和缩放
+static void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height);
+static void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data, 
+                                   int src_width, int src_height,
+                                   int dst_width, int dst_height);
+static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
+                              uint16_t* dst_buffer);
+
+// 显示和UI更新
+static void update_fps(void);
+static void update_image_display(void);
+static void init_lvgl_ui(void);
+
+// 线程和输入处理
+static void* camera_thread(void* arg);
+static void handle_keys(void);
 
 // ============================================================================
 // 全局变量
@@ -66,6 +98,7 @@ static media_session_t* media_session = NULL;
 static lv_obj_t* img_canvas = NULL;
 static lv_obj_t* fps_label = NULL;
 static lv_obj_t* status_label = NULL;
+static lv_obj_t* info_label = NULL;
 
 // 帧率统计
 static uint32_t frame_count = 0;
@@ -87,7 +120,7 @@ static int frame_available = 0;
 /**
  * @brief 信号处理函数
  */
-void signal_handler(int sig) {
+static void signal_handler(int sig) {
     printf("\nReceived signal %d, cleaning up...\n", sig);
     exit_flag = 1;
     
@@ -98,9 +131,65 @@ void signal_handler(int sig) {
 }
 
 /**
+ * @brief 检查和配置显示设备
+ */
+static void check_display_config(void) {
+    printf("=== Display Configuration Check ===\n");
+    
+    // 检查帧缓冲设备
+    printf("Framebuffer device info:\n");
+    system("ls -la /dev/fb* 2>/dev/null || echo 'No framebuffer devices found'");
+    
+    // 获取当前帧缓冲配置
+    printf("Current framebuffer settings:\n");
+    system("fbset 2>/dev/null || echo 'fbset not available'");
+    
+    // 检查显示相关的设备文件
+    printf("Display-related devices:\n");
+    system("ls -la /sys/class/graphics/ 2>/dev/null || echo 'No graphics devices found'");
+    
+    printf("=== End Display Check ===\n");
+}
+
+/**
+ * @brief 计算缩放后的图像尺寸 (保持宽高比，宽度对齐屏幕)
+ * @param src_width 源图像宽度
+ * @param src_height 源图像高度
+ * @param dst_width 输出缩放后宽度
+ * @param dst_height 输出缩放后高度
+ */
+static void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height) {
+    if (src_width <= 0 || src_height <= 0) {
+        *dst_width = DISPLAY_WIDTH;
+        *dst_height = DISPLAY_HEIGHT;
+        return;
+    }
+    
+    // 计算宽高比
+    float aspect_ratio = (float)src_height / (float)src_width;
+    
+    // 宽度固定为屏幕宽度320，高度根据宽高比计算
+    *dst_width = 320;  // 强制使用320像素宽度
+    *dst_height = (int)(320 * aspect_ratio);
+    
+    // 确保高度不超过屏幕高度240
+    if (*dst_height > 240) {
+        *dst_height = 240;
+        *dst_width = (int)(240 / aspect_ratio);
+    }
+    
+    // 确保最小尺寸
+    if (*dst_width < 160) *dst_width = 160;
+    if (*dst_height < 120) *dst_height = 120;
+    
+    printf("Image scaling: %dx%d -> %dx%d (aspect ratio: %.3f)\n", 
+           src_width, src_height, *dst_width, *dst_height, (double)aspect_ratio);
+}
+
+/**
  * @brief 计算帧率
  */
-void update_fps() {
+static void update_fps(void) {
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
     
@@ -114,7 +203,7 @@ void update_fps() {
         
         // 更新 FPS 显示
         if (fps_label) {
-            lv_label_set_text_fmt(fps_label, "FPS: %.1f", current_fps);
+            lv_label_set_text_fmt(fps_label, "FPS: %.1f", (double)current_fps);
         }
     }
 }
@@ -123,10 +212,12 @@ void update_fps() {
  * @brief RAW10 到 RGB565 转换 (简化版本)
  * @param raw_data RAW10 数据
  * @param rgb_data 输出 RGB565 数据
- * @param width 图像宽度
- * @param height 图像高度
+ * @param src_width 源图像宽度
+ * @param src_height 源图像高度
+ * @param dst_width 目标图像宽度
+ * @param dst_height 目标图像高度
  */
-void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data, 
+static void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data, 
                             int src_width, int src_height,
                             int dst_width, int dst_height) {
     // 简化的 RAW10 转换：只取高8位，当作灰度
@@ -180,32 +271,104 @@ void convert_raw10_to_rgb565(const uint8_t* raw_data, uint16_t* rgb_data,
 }
 
 /**
- * @brief 更新图像显示
+ * @brief 横屏图像适配函数 - 将图像缩放并居中到全屏缓冲区
+ * @param src_buffer 源图像缓冲区
+ * @param src_width 源图像宽度  
+ * @param src_height 源图像高度
+ * @param dst_buffer 目标全屏缓冲区 (320x240)
+ * @return 0 成功，-1 失败
  */
-void update_image_display() {
+static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
+                       uint16_t* dst_buffer) {
+    if (!src_buffer || !dst_buffer || src_width <= 0 || src_height <= 0) {
+        return -1;
+    }
+    
+    // 清空目标缓冲区 (黑色背景)
+    memset(dst_buffer, 0, DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t));
+    
+    // 计算居中位置
+    int x_offset = (DISPLAY_WIDTH - src_width) / 2;
+    int y_offset = (DISPLAY_HEIGHT - src_height) / 2;
+    
+    // 确保不超出边界
+    if (x_offset < 0) x_offset = 0;
+    if (y_offset < 0) y_offset = 0;
+    
+    int copy_width = (src_width > DISPLAY_WIDTH) ? DISPLAY_WIDTH : src_width;
+    int copy_height = (src_height > DISPLAY_HEIGHT) ? DISPLAY_HEIGHT : src_height;
+    
+    // 复制图像数据到居中位置
+    for (int y = 0; y < copy_height; y++) {
+        int dst_y = y + y_offset;
+        if (dst_y >= DISPLAY_HEIGHT) break;
+        
+        for (int x = 0; x < copy_width; x++) {
+            int dst_x = x + x_offset;
+            if (dst_x >= DISPLAY_WIDTH) break;
+            
+            int src_idx = y * src_width + x;
+            int dst_idx = dst_y * DISPLAY_WIDTH + dst_x;
+            
+            dst_buffer[dst_idx] = src_buffer[src_idx];
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 更新图像显示 (使用高效横屏适配)
+ */
+static void update_image_display(void) {
     pthread_mutex_lock(&frame_mutex);
     
     if (frame_available && current_frame.data && img_canvas) {
-        // 创建 RGB565 缓冲区
-        static uint16_t rgb_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+        // 计算动态缩放尺寸
+        int scaled_width, scaled_height;
+        calculate_scaled_size(current_frame.width, current_frame.height, 
+                             &scaled_width, &scaled_height);
         
-        // 转换 RAW10 到 RGB565
-        convert_raw10_to_rgb565((const uint8_t*)current_frame.data, rgb_buffer,
+        // 更新当前图像尺寸
+        current_img_width = scaled_width;
+        current_img_height = scaled_height;
+        
+        // 创建图像处理缓冲区
+        static uint16_t scaled_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+        static uint16_t display_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+        
+        // 第一步：RAW10 转换到 RGB565 (缩放到目标尺寸)
+        convert_raw10_to_rgb565((const uint8_t*)current_frame.data, scaled_buffer,
                                current_frame.width, current_frame.height,
-                               DISPLAY_WIDTH, DISPLAY_HEIGHT);
+                               scaled_width, scaled_height);
         
-        // 创建 LVGL 图像描述符
-        static lv_img_dsc_t img_dsc = {
-            .header.always_zero = 0,
-            .header.w = DISPLAY_WIDTH,
-            .header.h = DISPLAY_HEIGHT,
-            .data_size = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t),
-            .header.cf = LV_IMG_CF_TRUE_COLOR,
-            .data = (uint8_t*)rgb_buffer
-        };
-        
-        // 更新图像
-        lv_img_set_src(img_canvas, &img_dsc);
+        // 第二步：横屏适配 (居中显示到全屏缓冲区)
+        if (landscape_image_fit(scaled_buffer, scaled_width, scaled_height, display_buffer) == 0) {
+            // 创建 LVGL 图像描述符
+            static lv_img_dsc_t img_dsc;
+            img_dsc.header.always_zero = 0;
+            img_dsc.header.w = DISPLAY_WIDTH;   // 使用全屏宽度
+            img_dsc.header.h = DISPLAY_HEIGHT;  // 使用全屏高度
+            img_dsc.data_size = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t);
+            img_dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+            img_dsc.data = (uint8_t*)display_buffer;
+            
+            // 更新图像 (使用全屏显示)
+            lv_img_set_src(img_canvas, &img_dsc);
+            lv_obj_set_size(img_canvas, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+            lv_obj_set_pos(img_canvas, 0, 0);  // 左上角对齐
+            
+            // 更新分辨率信息显示
+            if (info_label) {
+                lv_label_set_text_fmt(info_label, "Cam: %dx%d", 
+                                     current_frame.width, current_frame.height);
+            }
+            
+            printf("Image updated: %dx%d -> %dx%d (landscape fit)\n", 
+                   current_frame.width, current_frame.height, scaled_width, scaled_height);
+        } else {
+            printf("Error: Failed to fit image for landscape display\n");
+        }
         
         frame_available = 0;
     }
@@ -220,7 +383,7 @@ void update_image_display() {
 /**
  * @brief 摄像头采集线程函数
  */
-void* camera_thread(void* arg) {
+static void* camera_thread(void* arg) {
     printf("Camera thread started\n");
     
     while (!exit_flag) {
@@ -267,7 +430,7 @@ void* camera_thread(void* arg) {
 /**
  * @brief 处理按键输入
  */
-void handle_keys() {
+static void handle_keys(void) {
     static int last_key0_state = 1;
     static int key0_debounce_count = 0;
     const int debounce_threshold = 5;
@@ -307,31 +470,59 @@ void handle_keys() {
 /**
  * @brief 初始化 LVGL 界面
  */
-void init_lvgl_ui() {
+static void init_lvgl_ui(void) {
     // 获取当前屏幕
     lv_obj_t* scr = lv_disp_get_scr_act(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     
-    // 创建图像显示区域
+    // 创建图像显示区域 (使用全屏尺寸320x240)
     img_canvas = lv_img_create(scr);
     lv_obj_set_pos(img_canvas, 0, 0);
-    lv_obj_set_size(img_canvas, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    lv_obj_set_size(img_canvas, 320, 240);  // 强制使用全屏尺寸
     
-    // 创建 FPS 标签 (右上角)
+    // 创建 FPS 标签 (右上角，横屏适配)
     fps_label = lv_label_create(scr);
     lv_label_set_text(fps_label, "FPS: 0.0");
     lv_obj_set_style_text_color(fps_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(fps_label, &lv_font_montserrat_14, 0);
+    // 添加半透明背景以提高可读性
+    lv_obj_set_style_bg_color(fps_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(fps_label, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(fps_label, 2, 0);
     lv_obj_align(fps_label, LV_ALIGN_TOP_RIGHT, -5, 5);
     
-    // 创建状态标签 (左上角)
+    // 创建状态标签 (左上角，横屏适配)
     status_label = lv_label_create(scr);
     lv_label_set_text(status_label, "RUNNING");
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 255, 0), 0);
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
+    // 添加半透明背景以提高可读性
+    lv_obj_set_style_bg_color(status_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(status_label, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(status_label, 2, 0);
     lv_obj_align(status_label, LV_ALIGN_TOP_LEFT, 5, 5);
     
-    printf("LVGL UI initialized\n");
+    // 创建图像信息标签 (左下角，显示分辨率信息)
+    info_label = lv_label_create(scr);
+    lv_label_set_text(info_label, "Cam: 0x0");
+    lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(info_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(info_label, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(info_label, 2, 0);
+    lv_obj_align(info_label, LV_ALIGN_BOTTOM_LEFT, 5, -5);
+    
+    // 创建控制提示标签 (右下角)
+    lv_obj_t* hint_label = lv_label_create(scr);
+    lv_label_set_text(hint_label, "KEY0: Pause/Resume");
+    lv_obj_set_style_text_color(hint_label, lv_color_make(200, 200, 200), 0);
+    lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(hint_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(hint_label, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(hint_label, 2, 0);
+    lv_obj_align(hint_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
+    
+    printf("LVGL UI initialized (landscape mode: %dx%d)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
 
 // ============================================================================
@@ -348,21 +539,42 @@ int main(void) {
     // 初始化 LVGL
     lv_init();
     
+    // 检查显示配置
+    check_display_config();
+    
     // 初始化帧缓冲设备
     fbdev_init();
+    
+    // 检查帧缓冲设备信息并尝试设置横屏
+    printf("Checking framebuffer configuration...\n");
+    system("fbset | grep geometry");
+    
+    // 尝试设置帧缓冲为横屏模式
+    // 注意：这可能需要root权限和设备支持
+    printf("Attempting to set landscape mode...\n");
+    int fb_ret = system("fbset -xres 320 -yres 240 2>/dev/null");
+    if (fb_ret == 0) {
+        printf("Framebuffer set to 320x240\n");
+    } else {
+        printf("Warning: Could not set framebuffer resolution\n");
+    }
     
     // 创建 LVGL 显示缓冲区
     static lv_color_t buf[DISP_BUF_SIZE];
     static lv_disp_draw_buf_t disp_buf;
     lv_disp_draw_buf_init(&disp_buf, buf, NULL, DISP_BUF_SIZE);
     
-    // 注册显示驱动
+    // 注册显示驱动 (强制横屏模式: 320x240)
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
     disp_drv.draw_buf = &disp_buf;
     disp_drv.flush_cb = fbdev_flush;
-    disp_drv.hor_res = LCD_WIDTH;
-    disp_drv.ver_res = LCD_HEIGHT;
+    disp_drv.hor_res = 320;  // 强制设置横屏宽度
+    disp_drv.ver_res = 240;  // 强制设置横屏高度
+    
+    // 尝试设置旋转（如果支持）
+    // disp_drv.rotated = LV_DISP_ROT_90;  // 如果需要旋转90度
+    
     lv_disp_drv_register(&disp_drv);
     
     // 初始化 GPIO
@@ -423,6 +635,13 @@ int main(void) {
     }
     
     printf("System initialized successfully\n");
+    printf("Display: 320x240 (forced landscape mode)\n");
+    printf("Camera: %dx%d (RAW10)\n", CAMERA_WIDTH, CAMERA_HEIGHT);
+    printf("Scaling: Width-aligned to 320px, maintaining aspect ratio\n");
+    printf("Example scaling:\n");
+    printf("  1920x1080 -> 320x180 (16:9)\n");
+    printf("  1600x1200 -> 320x240 (4:3)\n");
+    printf("  1280x720  -> 320x180 (16:9)\n");
     printf("Controls:\n");
     printf("  KEY0 (PIN %d) - Pause/Resume camera\n", KEY0_PIN);
     printf("  Ctrl+C - Exit\n");
