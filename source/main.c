@@ -143,7 +143,8 @@ static void* tcp_sender_thread(void* arg);
 
 // 系统状态
 static volatile int exit_flag = 0;
-static volatile int camera_paused = 0;
+static volatile int camera_paused = 0;      // 摄像头采集暂停状态
+static volatile int display_enabled = 1;    // 图像显示开关状态 (KEY0控制)
 static volatile int tcp_enabled = 0;
 static volatile int screen_on = 1;          // 屏幕开关状态
 static struct timeval last_activity_time;  // 最后活动时间
@@ -478,7 +479,7 @@ static void turn_screen_on(void) {
  * @brief 检查屏幕超时并自动关闭
  */
 static void check_screen_timeout(void) {
-    if (!screen_on || !camera_paused) return;
+    if (!screen_on || display_enabled) return; // 只在屏幕开启且显示关闭时检查超时
     
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
@@ -909,17 +910,12 @@ static void update_image_display(void) {
 // ============================================================================
 
 /**
- * @brief 摄像头采集线程函数
+ * @brief 摄像头采集线程函数 (始终运行，不受显示状态影响)
  */
 static void* camera_thread(void* arg) {
-    printf("Camera thread started\n");
+    printf("Camera thread started (always running)\n");
     
     while (!exit_flag) {
-        if (camera_paused) {
-            usleep(100000); // 暂停时休眠100ms
-            continue;
-        }
-        
         media_frame_t frame;
         
         // 采集帧数据 (减少超时时间，更快响应退出)
@@ -1009,51 +1005,35 @@ static void handle_keys(void) {
     // 屏幕开启时才处理按键功能
     if (!screen_on) return;
     
-    // KEY0 去抖动处理 (摄像头暂停/恢复)
+    // KEY0 去抖动处理 (图像显示开关 - 不影响摄像头采集和TCP传输)
     if (current_key0 == last_key0_state) {
         key0_debounce_count = 0;
     } else {
         key0_debounce_count++;
         if (key0_debounce_count >= debounce_threshold) {
             if (last_key0_state == 1 && current_key0 == 0) {
-                // KEY0 按下事件 - 摄像头暂停/恢复
-                camera_paused = !camera_paused;
+                // KEY0 按下事件 - 图像显示开关
+                display_enabled = !display_enabled;
                 
-                printf("Camera %s (Key response time optimized)\n", 
-                       camera_paused ? "PAUSED" : "RESUMED");
+                printf("Display %s (camera continues running)\n", 
+                       display_enabled ? "ENABLED" : "DISABLED");
                 
                 // 更新活动时间
                 update_activity_time();
                 
                 // 更新状态显示
                 if (status_label) {
-                    lv_label_set_text(status_label, camera_paused ? "PAUSED" : "RUNNING");
+                    lv_label_set_text(status_label, display_enabled ? "DISPLAY ON" : "DISPLAY OFF");
                     lv_obj_set_style_text_color(status_label, 
-                                               camera_paused ? lv_color_make(255, 0, 0) : lv_color_make(0, 255, 0), 0);
+                                               display_enabled ? lv_color_make(0, 255, 0) : lv_color_make(255, 255, 0), 0);
                 }
                 
-                // 如果摄像头被暂停且TCP正在运行，关闭TCP
-                if (camera_paused && tcp_enabled) {
-                    printf("Camera paused, automatically disabling TCP transmission\n");
-                    tcp_enabled = 0;
-                    
-                    // 关闭TCP连接
-                    if (client_connected) {
-                        shutdown(client_fd, SHUT_RDWR);
-                        close(client_fd);
-                        client_connected = 0;
-                        client_fd = -1;
-                    }
-                    if (server_fd >= 0) {
-                        shutdown(server_fd, SHUT_RDWR);
-                        close(server_fd);
-                        server_fd = -1;
-                    }
-                    
-                    // 更新TCP状态显示
-                    if (tcp_label) {
-                        lv_label_set_text(tcp_label, "TCP: OFF");
-                        lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
+                // 如果禁用显示，隐藏图像；如果启用显示，显示图像
+                if (img_canvas) {
+                    if (display_enabled) {
+                        lv_obj_clear_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
                     }
                 }
             }
@@ -1062,7 +1042,7 @@ static void handle_keys(void) {
         }
     }
     
-    // KEY1 去抖动处理 (TCP传输开关)
+    // KEY1 去抖动处理 (TCP传输开关 - 独立于摄像头和显示状态)
     if (current_key1 == last_key1_state) {
         key1_debounce_count = 0;
     } else {
@@ -1070,103 +1050,84 @@ static void handle_keys(void) {
         if (key1_debounce_count >= debounce_threshold) {
             if (last_key1_state == 1 && current_key1 == 0) {
                 // KEY1 按下事件 - TCP传输开关
+                tcp_enabled = !tcp_enabled;
                 
-                // 检查摄像头是否暂停
-                if (camera_paused) {
-                    printf("Cannot enable TCP: Camera is paused. Resume camera first.\n");
+                printf("TCP transmission %s\n", tcp_enabled ? "ENABLED" : "DISABLED");
+                
+                // 更新活动时间
+                update_activity_time();
+                
+                if (tcp_enabled) {
+                    // 启动TCP传输
+                    if (server_fd < 0) {
+                        server_fd = create_server(DEFAULT_PORT);
+                        if (server_fd >= 0) {
+                            if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0) {
+                                printf("TCP server started successfully\n");
+                                // 更新TCP状态显示
+                                if (tcp_label) {
+                                    lv_label_set_text(tcp_label, "TCP: ON");
+                                    lv_obj_set_style_text_color(tcp_label, lv_color_make(0, 255, 255), 0);
+                                }
+                            } else {
+                                printf("Failed to create TCP thread\n");
+                                close(server_fd);
+                                server_fd = -1;
+                                tcp_enabled = 0;
+                            }
+                        } else {
+                            printf("Failed to create TCP server\n");
+                            tcp_enabled = 0;
+                        }
+                    }
+                } else {
+                    // 停止TCP传输
+                    printf("Stopping TCP transmission...\n");
                     
-                    // 更新TCP状态显示为错误状态
-                    if (tcp_label) {
-                        lv_label_set_text(tcp_label, "TCP: ERR");
-                        lv_obj_set_style_text_color(tcp_label, lv_color_make(255, 128, 0), 0);
+                    // 关闭客户端连接
+                    if (client_connected) {
+                        shutdown(client_fd, SHUT_RDWR);
+                        close(client_fd);
+                        client_connected = 0;
+                        client_fd = -1;
+                        printf("Client connection closed\n");
                     }
                     
-                    // 2秒后恢复正常显示
-                    usleep(2000000);
+                    // 关闭服务器socket
+                    if (server_fd >= 0) {
+                        shutdown(server_fd, SHUT_RDWR);
+                        close(server_fd);
+                        server_fd = -1;
+                        printf("Server socket closed\n");
+                    }
+                    
+                    // 等待TCP线程退出
+                    pthread_cond_broadcast(&frame_ready); // 唤醒TCP线程
+                    void* tcp_ret;
+                    struct timespec timeout;
+                    clock_gettime(CLOCK_REALTIME, &timeout);
+                    timeout.tv_sec += 2; // 2秒超时
+                    
+                    int join_result = pthread_timedjoin_np(tcp_thread_id, &tcp_ret, &timeout);
+                    if (join_result == 0) {
+                        printf("TCP thread exited successfully\n");
+                    } else if (join_result == ETIMEDOUT) {
+                        printf("Warning: TCP thread timeout, forcing cancel\n");
+                        pthread_cancel(tcp_thread_id);
+                        pthread_join(tcp_thread_id, NULL);
+                    } else {
+                        printf("Warning: TCP thread join failed: %d\n", join_result);
+                    }
+                    
+                    // 短暂延迟确保端口完全释放
+                    usleep(100000); // 100ms
+                    
+                    // 更新TCP状态显示
                     if (tcp_label) {
                         lv_label_set_text(tcp_label, "TCP: OFF");
                         lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
                     }
-                } else {
-                    tcp_enabled = !tcp_enabled;
-                    
-                    printf("TCP transmission %s\n", tcp_enabled ? "ENABLED" : "DISABLED");
-                    
-                    // 更新活动时间
-                    update_activity_time();
-                    
-                    if (tcp_enabled) {
-                        // 启动TCP传输
-                        if (server_fd < 0) {
-                            server_fd = create_server(DEFAULT_PORT);
-                            if (server_fd >= 0) {
-                                if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0) {
-                                    printf("TCP server started successfully\n");
-                                    // 更新TCP状态显示
-                                    if (tcp_label) {
-                                        lv_label_set_text(tcp_label, "TCP: ON");
-                                        lv_obj_set_style_text_color(tcp_label, lv_color_make(0, 255, 255), 0);
-                                    }
-                                } else {
-                                    printf("Failed to create TCP thread\n");
-                                    close(server_fd);
-                                    server_fd = -1;
-                                    tcp_enabled = 0;
-                                }
-                            } else {
-                                printf("Failed to create TCP server\n");
-                                tcp_enabled = 0;
-                            }
-                        }
-                    } else {
-                        // 停止TCP传输
-                        printf("Stopping TCP transmission...\n");
-                        
-                        // 关闭客户端连接
-                        if (client_connected) {
-                            shutdown(client_fd, SHUT_RDWR);
-                            close(client_fd);
-                            client_connected = 0;
-                            client_fd = -1;
-                            printf("Client connection closed\n");
-                        }
-                        
-                        // 关闭服务器socket
-                        if (server_fd >= 0) {
-                            shutdown(server_fd, SHUT_RDWR);
-                            close(server_fd);
-                            server_fd = -1;
-                            printf("Server socket closed\n");
-                        }
-                        
-                        // 等待TCP线程退出
-                        pthread_cond_broadcast(&frame_ready); // 唤醒TCP线程
-                        void* tcp_ret;
-                        struct timespec timeout;
-                        clock_gettime(CLOCK_REALTIME, &timeout);
-                        timeout.tv_sec += 2; // 2秒超时
-                        
-                        int join_result = pthread_timedjoin_np(tcp_thread_id, &tcp_ret, &timeout);
-                        if (join_result == 0) {
-                            printf("TCP thread exited successfully\n");
-                        } else if (join_result == ETIMEDOUT) {
-                            printf("Warning: TCP thread timeout, forcing cancel\n");
-                            pthread_cancel(tcp_thread_id);
-                            pthread_join(tcp_thread_id, NULL);
-                        } else {
-                            printf("Warning: TCP thread join failed: %d\n", join_result);
-                        }
-                        
-                        // 短暂延迟确保端口完全释放
-                        usleep(100000); // 100ms
-                        
-                        // 更新TCP状态显示
-                        if (tcp_label) {
-                            lv_label_set_text(tcp_label, "TCP: OFF");
-                            lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
-                        }
-                        printf("TCP transmission stopped completely\n");
-                    }
+                    printf("TCP transmission stopped completely\n");
                 }
             }
             last_key1_state = current_key1;
@@ -1379,18 +1340,19 @@ int main(void) {
     printf("  - Optimized key debouncing (3 samples)\n");
     printf("  - Reduced debug output for better performance\n");
     printf("Controls:\n");
-    printf("  KEY0 (PIN %d) - Pause/Resume camera\n", KEY0_PIN);
+    printf("  KEY0 (PIN %d) - Toggle image display ON/OFF (camera keeps running)\n", KEY0_PIN);
     printf("  KEY1 (PIN %d) - Enable/Disable TCP transmission\n", KEY1_PIN);
     printf("  KEY2 (PIN %d) - Wake screen / Update activity\n", KEY2_PIN);
     printf("  KEY3 (PIN %d) - Wake screen / Update activity\n", KEY3_PIN);
     printf("  Any key - Wake screen if auto-sleep activated\n");
     printf("  Ctrl+C - Exit\n");
     printf("Screen Management:\n");
-    printf("  - Auto-sleep after 5s camera pause\n");
+    printf("  - Auto-sleep after 5s when display is OFF\n");
     printf("  - Wake with any key press\n");
-    printf("TCP Restrictions:\n");
-    printf("  - TCP can only be enabled when camera is running\n");
-    printf("  - TCP auto-disabled when camera is paused\n");
+    printf("Function Independence:\n");
+    printf("  - Camera: Always running (captures frames continuously)\n");
+    printf("  - Display: Controlled by KEY0 (ON/OFF)\n");
+    printf("  - TCP: Controlled by KEY1 (independent of display status)\n");
     printf("TCP Server: %s:%d (disabled by default)\n", DEFAULT_SERVER_IP, DEFAULT_PORT);
     
     // 主循环
@@ -1422,8 +1384,8 @@ int main(void) {
                                 (current_time.tv_usec - last_display_update.tv_usec);
         
         if (display_time_diff >= 33333) { // 30 FPS = 33.33ms
-            // 只在屏幕开启时更新图像显示
-            if (screen_on) {
+            // 只在屏幕开启且显示启用时更新图像显示
+            if (screen_on && display_enabled) {
                 update_image_display();
             }
             last_display_update = current_time;
