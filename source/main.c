@@ -187,9 +187,14 @@ static void signal_handler(int sig) {
     // 关闭TCP连接
     if (client_connected && client_fd >= 0) {
         shutdown(client_fd, SHUT_RDWR);
+        close(client_fd);
+        client_connected = 0;
+        client_fd = -1;
     }
     if (server_fd >= 0) {
         shutdown(server_fd, SHUT_RDWR);
+        close(server_fd);
+        server_fd = -1;
     }
     
     // 通知所有等待线程
@@ -245,10 +250,17 @@ static int create_server(int port) {
         return -1;
     }
 
+    // 设置 SO_REUSEADDR 选项，允许重用地址
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        perror("setsockopt failed");
+        perror("setsockopt SO_REUSEADDR failed");
         close(fd);
         return -1;
+    }
+    
+    // 设置 SO_REUSEPORT 选项（如果支持），允许重用端口
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt)) < 0) {
+        // 某些系统可能不支持 SO_REUSEPORT，这里只打印警告
+        printf("Warning: SO_REUSEPORT not supported\n");
     }
 
     memset(&addr, 0, sizeof(addr));
@@ -320,22 +332,44 @@ static void* tcp_sender_thread(void* arg) {
 
     while (!exit_flag && tcp_enabled) {
         // 等待客户端连接
-        if (!client_connected && tcp_enabled) {
+        if (!client_connected && tcp_enabled && server_fd >= 0) {
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
 
             printf("Waiting for TCP client connection...\n");
-            client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
-
-            if (client_fd < 0) {
-                if (!exit_flag && tcp_enabled) {
-                    perror("accept failed");
+            
+            // 设置 socket 为非阻塞模式，避免 accept 无限阻塞
+            fd_set readfds;
+            struct timeval timeout;
+            
+            FD_ZERO(&readfds);
+            FD_SET(server_fd, &readfds);
+            timeout.tv_sec = 1;  // 1秒超时
+            timeout.tv_usec = 0;
+            
+            int select_result = select(server_fd + 1, &readfds, NULL, NULL, &timeout);
+            
+            if (select_result > 0 && FD_ISSET(server_fd, &readfds)) {
+                client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+                
+                if (client_fd >= 0) {
+                    printf("TCP Client connected from %s\n", inet_ntoa(client_addr.sin_addr));
+                    client_connected = 1;
+                } else {
+                    if (tcp_enabled && !exit_flag) {
+                        perror("accept failed");
+                    }
                 }
-                continue;
+            } else if (select_result < 0 && tcp_enabled && !exit_flag) {
+                perror("select failed");
+                break;
             }
-
-            printf("TCP Client connected from %s\n", inet_ntoa(client_addr.sin_addr));
-            client_connected = 1;
+            
+            // 检查是否需要退出
+            if (!tcp_enabled || exit_flag) {
+                break;
+            }
+            continue;
         }
 
         // 等待新帧数据
@@ -368,9 +402,12 @@ static void* tcp_sender_thread(void* arg) {
         usleep(1000); // 1ms
     }
 
-    if (client_connected) {
+    // 清理TCP连接
+    if (client_connected && client_fd >= 0) {
+        shutdown(client_fd, SHUT_RDWR);
         close(client_fd);
         client_connected = 0;
+        client_fd = -1;
     }
 
     printf("TCP sender thread terminated\n");
@@ -938,21 +975,52 @@ static void handle_keys(void) {
                     }
                 } else {
                     // 停止TCP传输
+                    printf("Stopping TCP transmission...\n");
+                    
+                    // 关闭客户端连接
                     if (client_connected) {
+                        shutdown(client_fd, SHUT_RDWR);
                         close(client_fd);
                         client_connected = 0;
+                        client_fd = -1;
+                        printf("Client connection closed\n");
                     }
+                    
+                    // 关闭服务器socket
                     if (server_fd >= 0) {
+                        shutdown(server_fd, SHUT_RDWR);
                         close(server_fd);
                         server_fd = -1;
+                        printf("Server socket closed\n");
                     }
+                    
+                    // 等待TCP线程退出
+                    pthread_cond_broadcast(&frame_ready); // 唤醒TCP线程
+                    void* tcp_ret;
+                    struct timespec timeout;
+                    clock_gettime(CLOCK_REALTIME, &timeout);
+                    timeout.tv_sec += 2; // 2秒超时
+                    
+                    int join_result = pthread_timedjoin_np(tcp_thread_id, &tcp_ret, &timeout);
+                    if (join_result == 0) {
+                        printf("TCP thread exited successfully\n");
+                    } else if (join_result == ETIMEDOUT) {
+                        printf("Warning: TCP thread timeout, forcing cancel\n");
+                        pthread_cancel(tcp_thread_id);
+                        pthread_join(tcp_thread_id, NULL);
+                    } else {
+                        printf("Warning: TCP thread join failed: %d\n", join_result);
+                    }
+                    
+                    // 短暂延迟确保端口完全释放
+                    usleep(100000); // 100ms
+                    
                     // 更新TCP状态显示
                     if (tcp_label) {
                         lv_label_set_text(tcp_label, "TCP: OFF");
                         lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
                     }
-                    // TCP线程会自动退出，因为tcp_enabled被设为false
-                    printf("TCP transmission stopped\n");
+                    printf("TCP transmission stopped completely\n");
                 }
             }
             last_key1_state = current_key1;
