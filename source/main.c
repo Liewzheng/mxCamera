@@ -15,6 +15,11 @@
  * - libstaging.so (图像处理，来自 fbtft_benchmark)
  */
 
+// 定义 GNU 扩展以支持 pthread_timedjoin_np
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <pthread.h>
 #include <sys/time.h>
 #include <time.h>
@@ -24,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
 
 // 库头文件
 #include <gpio.h>
@@ -124,10 +130,17 @@ static void signal_handler(int sig) {
     printf("\nReceived signal %d, cleaning up...\n", sig);
     exit_flag = 1;
     
+    // 强制刷新输出缓冲区
+    fflush(stdout);
+    fflush(stderr);
+    
     // 通知所有等待线程
     pthread_mutex_lock(&frame_mutex);
     pthread_cond_broadcast(&frame_ready);
     pthread_mutex_unlock(&frame_mutex);
+    
+    // 给线程一些时间来响应退出标志
+    usleep(100000); // 100ms
 }
 
 /**
@@ -394,9 +407,15 @@ static void* camera_thread(void* arg) {
         
         media_frame_t frame;
         
-        // 采集帧数据
-        int ret = libmedia_session_capture_frame(media_session, &frame, 100);
+        // 采集帧数据 (减少超时时间，更快响应退出)
+        int ret = libmedia_session_capture_frame(media_session, &frame, 50); // 50ms 超时
         if (ret == 0) {
+            // 再次检查退出标志
+            if (exit_flag) {
+                libmedia_session_release_frame(media_session, &frame);
+                break;
+            }
+            
             pthread_mutex_lock(&frame_mutex);
             
             // 更新当前帧
@@ -414,8 +433,10 @@ static void* camera_thread(void* arg) {
             // 更新帧率
             update_fps();
         } else if (ret != -EAGAIN) {
-            printf("Failed to capture frame: %d\n", ret);
-            usleep(10000);
+            if (!exit_flag) { // 只在未退出时打印错误
+                printf("Failed to capture frame: %d\n", ret);
+            }
+            usleep(10000); // 10ms
         }
     }
     
@@ -491,7 +512,7 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_pad_all(fps_label, 2, 0);
     lv_obj_align(fps_label, LV_ALIGN_TOP_RIGHT, -5, 5);
     
-    // 创建状态标签 (左上角，横屏适配)
+    // 创建状态标签 (右下角，替代按键提示)
     status_label = lv_label_create(scr);
     lv_label_set_text(status_label, "RUNNING");
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 255, 0), 0);
@@ -500,7 +521,7 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_bg_color(status_label, lv_color_make(0, 0, 0), 0);
     lv_obj_set_style_bg_opa(status_label, LV_OPA_50, 0);
     lv_obj_set_style_pad_all(status_label, 2, 0);
-    lv_obj_align(status_label, LV_ALIGN_TOP_LEFT, 5, 5);
+    lv_obj_align(status_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
     
     // 创建图像信息标签 (左下角，显示分辨率信息)
     info_label = lv_label_create(scr);
@@ -511,16 +532,6 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_bg_opa(info_label, LV_OPA_50, 0);
     lv_obj_set_style_pad_all(info_label, 2, 0);
     lv_obj_align(info_label, LV_ALIGN_BOTTOM_LEFT, 5, -5);
-    
-    // 创建控制提示标签 (右下角)
-    lv_obj_t* hint_label = lv_label_create(scr);
-    lv_label_set_text(hint_label, "KEY0: Pause/Resume");
-    lv_obj_set_style_text_color(hint_label, lv_color_make(200, 200, 200), 0);
-    lv_obj_set_style_text_font(hint_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_color(hint_label, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(hint_label, LV_OPA_30, 0);
-    lv_obj_set_style_pad_all(hint_label, 2, 0);
-    lv_obj_align(hint_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
     
     printf("LVGL UI initialized (landscape mode: %dx%d)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
@@ -651,8 +662,14 @@ int main(void) {
         // 处理 LVGL 任务
         lv_timer_handler();
         
+        // 再次检查退出标志
+        if (exit_flag) break;
+        
         // 处理按键
         handle_keys();
+        
+        // 再次检查退出标志
+        if (exit_flag) break;
         
         // 更新图像显示
         update_image_display();
@@ -661,24 +678,63 @@ int main(void) {
         usleep(5000); // 5ms
     }
     
-    printf("Shutting down...\n");
+    printf("Main loop exited, shutting down...\n");
     
-    // 等待摄像头线程结束
-    pthread_join(camera_tid, NULL);
+    // 确保停止媒体会话，避免阻塞
+    printf("Stopping media session...\n");
+    if (media_session) {
+        libmedia_stop_session(media_session);
+    }
+    
+    // 等待摄像头线程结束 (设置超时)
+    printf("Waiting for camera thread to exit...\n");
+    struct timespec timeout;
+    clock_gettime(CLOCK_REALTIME, &timeout);
+    timeout.tv_sec += 3; // 3秒超时
+    
+    int join_result = pthread_timedjoin_np(camera_tid, NULL, &timeout);
+    if (join_result == ETIMEDOUT) {
+        printf("Warning: Camera thread did not exit within timeout, canceling...\n");
+        pthread_cancel(camera_tid);
+        pthread_join(camera_tid, NULL);
+    } else if (join_result != 0) {
+        printf("Warning: pthread_join failed: %d\n", join_result);
+    } else {
+        printf("Camera thread joined successfully\n");
+    }
     
 cleanup:
+    // 清理当前帧数据
+    printf("Cleaning up frame data...\n");
+    pthread_mutex_lock(&frame_mutex);
+    if (current_frame.data) {
+        libmedia_session_release_frame(media_session, &current_frame);
+        current_frame.data = NULL;
+    }
+    pthread_mutex_unlock(&frame_mutex);
+    
     // 清理媒体会话
+    printf("Cleaning up media session...\n");
     if (media_session) {
         libmedia_stop_session(media_session);
         libmedia_destroy_session(media_session);
+        media_session = NULL;
     }
     
     // 清理 libMedia
+    printf("Deinitializing libMedia...\n");
     libmedia_deinit();
     
     // 清理 GPIO
+    printf("Cleaning up GPIO...\n");
     DEV_ModuleExit();
     
+    // 清理互斥锁和条件变量
+    printf("Cleaning up synchronization objects...\n");
+    pthread_mutex_destroy(&frame_mutex);
+    pthread_cond_destroy(&frame_ready);
+    
     printf("System shutdown complete\n");
+    fflush(stdout);
     return 0;
 }
