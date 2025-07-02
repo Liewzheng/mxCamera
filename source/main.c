@@ -89,6 +89,11 @@ static void update_fps(void);
 static void update_image_display(void);
 static void init_lvgl_ui(void);
 
+// 系统资源监控
+static float get_cpu_usage(void);
+static float get_memory_usage(void);
+static void update_system_info(void);
+
 // 线程和输入处理
 static void* camera_thread(void* arg);
 static void handle_keys(void);
@@ -106,7 +111,6 @@ static media_session_t* media_session = NULL;
 
 // LVGL 对象
 static lv_obj_t* img_canvas = NULL;
-static lv_obj_t* fps_label = NULL;
 static lv_obj_t* status_label = NULL;
 static lv_obj_t* info_label = NULL;
 
@@ -218,12 +222,112 @@ static void update_fps(void) {
         frame_count = 0;
         last_fps_time = current_time;
         
-        // 更新 FPS 显示
-        if (fps_label) {
-            char fps_text[32];
-            snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", (double)current_fps);
-            lv_label_set_text(fps_label, fps_text);
-        }
+        // FPS 现在由 update_system_info 函数统一更新到 info_label
+    }
+}
+
+/**
+ * @brief 获取CPU使用率
+ * @return CPU使用率百分比 (0.0-100.0)
+ */
+static float get_cpu_usage(void) {
+    static unsigned long long last_total = 0, last_idle = 0;
+    unsigned long long total, idle, user, nice, system, iowait, irq, softirq, steal;
+    
+    FILE *fp = fopen("/proc/stat", "r");
+    if (!fp) {
+        return -1.0f;
+    }
+    
+    if (fscanf(fp, "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+               &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal) != 8) {
+        fclose(fp);
+        return -1.0f;
+    }
+    fclose(fp);
+    
+    total = user + nice + system + idle + iowait + irq + softirq + steal;
+    
+    if (last_total == 0) {
+        // 第一次调用，保存当前值
+        last_total = total;
+        last_idle = idle;
+        return 0.0f;
+    }
+    
+    unsigned long long total_diff = total - last_total;
+    unsigned long long idle_diff = idle - last_idle;
+    
+    float cpu_usage = 0.0f;
+    if (total_diff > 0) {
+        cpu_usage = 100.0f * (1.0f - (float)idle_diff / (float)total_diff);
+    }
+    
+    last_total = total;
+    last_idle = idle;
+    
+    return cpu_usage;
+}
+
+/**
+ * @brief 获取内存使用率
+ * @return 内存使用率百分比 (0.0-100.0)
+ */
+static float get_memory_usage(void) {
+    FILE *fp = fopen("/proc/meminfo", "r");
+    if (!fp) {
+        return -1.0f;
+    }
+    
+    unsigned long mem_total = 0, mem_free = 0, buffers = 0, cached = 0;
+    char line[256];
+    
+    while (fgets(line, sizeof(line), fp)) {
+        if (sscanf(line, "MemTotal: %lu kB", &mem_total) == 1) continue;
+        if (sscanf(line, "MemFree: %lu kB", &mem_free) == 1) continue;
+        if (sscanf(line, "Buffers: %lu kB", &buffers) == 1) continue;
+        if (sscanf(line, "Cached: %lu kB", &cached) == 1) continue;
+    }
+    fclose(fp);
+    
+    if (mem_total == 0) {
+        return -1.0f;
+    }
+    
+    unsigned long mem_used = mem_total - mem_free - buffers - cached;
+    return 100.0f * (float)mem_used / (float)mem_total;
+}
+
+/**
+ * @brief 更新系统信息显示（合并图像大小、帧率、CPU和内存占用）
+ */
+static void update_system_info(void) {
+    if (!info_label) return;
+    
+    static struct timeval last_update = {0};
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    
+    // 每500ms更新一次系统信息（提高更新频率以显示实时FPS）
+    long time_diff = (current_time.tv_sec - last_update.tv_sec) * 1000000 +
+                     (current_time.tv_usec - last_update.tv_usec);
+    
+    if (time_diff >= 500000) { // 0.5秒
+        float cpu_usage = get_cpu_usage();
+        float mem_usage = get_memory_usage();
+        
+        char info_text[64];
+        // 格式：图像大小 帧率 CPU占用率% 内存占用率%
+        // 例如：1920x1080 30.4 98% 70%
+        snprintf(info_text, sizeof(info_text), 
+                "%dx%d  %.1fFPS  %.0f%%  %.0f%%", 
+                CAMERA_WIDTH, CAMERA_HEIGHT,
+                (double)current_fps, 
+                (double)(cpu_usage >= 0 ? cpu_usage : 0),
+                (double)(mem_usage >= 0 ? mem_usage : 0));
+        
+        lv_label_set_text(info_label, info_text);
+        last_update = current_time;
     }
 }
 
@@ -465,14 +569,6 @@ static void update_image_display(void) {
             lv_obj_set_size(img_canvas, DISPLAY_WIDTH, DISPLAY_HEIGHT);
             lv_obj_set_pos(img_canvas, 0, 0);  // 左上角对齐
             
-            // 更新分辨率信息显示
-            if (info_label) {
-                char info_text[64];
-                snprintf(info_text, sizeof(info_text), "Cam: %dx%d", 
-                        current_frame.width, current_frame.height);
-                lv_label_set_text(info_label, info_text);
-            }
-            
             // 只在尺寸变化时打印成功信息
             if (current_frame.width != last_processed_width || current_frame.height != last_processed_height) {
                 printf("Image updated: %dx%d -> %dx%d (SBGGR10 properly unpacked)\n", 
@@ -614,16 +710,15 @@ static void init_lvgl_ui(void) {
     lv_obj_set_pos(img_canvas, 0, 0);
     lv_obj_set_size(img_canvas, 320, 240);  // 强制使用全屏尺寸
     
-    // 创建 FPS 标签 (右上角，横屏适配)
-    fps_label = lv_label_create(scr);
-    lv_label_set_text(fps_label, "FPS: 0.0");
-    lv_obj_set_style_text_color(fps_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(fps_label, &lv_font_montserrat_14, 0);
-    // 添加半透明背景以提高可读性
-    lv_obj_set_style_bg_color(fps_label, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(fps_label, LV_OPA_50, 0);
-    lv_obj_set_style_pad_all(fps_label, 2, 0);
-    lv_obj_align(fps_label, LV_ALIGN_TOP_RIGHT, -5, 5);
+    // 创建系统信息标签 (左上角，合并显示图像大小、帧率、CPU和内存占用)
+    info_label = lv_label_create(scr);
+    lv_label_set_text(info_label, "0x0 0.0 0% 0%");
+    lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(info_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(info_label, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(info_label, 2, 0);
+    lv_obj_align(info_label, LV_ALIGN_TOP_LEFT, 5, 5);
     
     // 创建状态标签 (右下角，替代按键提示)
     status_label = lv_label_create(scr);
@@ -635,16 +730,6 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_bg_opa(status_label, LV_OPA_50, 0);
     lv_obj_set_style_pad_all(status_label, 2, 0);
     lv_obj_align(status_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
-    
-    // 创建图像信息标签 (左下角，显示分辨率信息)
-    info_label = lv_label_create(scr);
-    lv_label_set_text(info_label, "Cam: 0x0");
-    lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_color(info_label, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(info_label, LV_OPA_50, 0);
-    lv_obj_set_style_pad_all(info_label, 2, 0);
-    lv_obj_align(info_label, LV_ALIGN_BOTTOM_LEFT, 5, -5);
     
     printf("LVGL UI initialized (landscape mode: %dx%d)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
@@ -800,6 +885,9 @@ int main(void) {
             update_image_display();
             last_display_update = current_time;
         }
+        
+        // 更新系统信息 (CPU和内存占用)
+        update_system_info();
         
         // 动态休眠时间：降低CPU占用
         loop_count++;
