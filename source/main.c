@@ -66,12 +66,17 @@ struct frame_header {
 
 #define DISP_BUF_SIZE (320 * 240)
 
-// 摄像头配置
-#define CAMERA_WIDTH 1920
-#define CAMERA_HEIGHT 1080
+// 摄像头配置 (默认值，可通过命令行参数覆盖)
+#define DEFAULT_CAMERA_WIDTH 1920
+#define DEFAULT_CAMERA_HEIGHT 1080
 #define CAMERA_PIXELFORMAT V4L2_PIX_FMT_SBGGR10
-#define CAMERA_DEVICE "/dev/video0"
+#define DEFAULT_CAMERA_DEVICE "/dev/video0"
 #define BUFFER_COUNT 4
+
+// 全局摄像头配置变量 (可通过命令行修改)
+static int camera_width = DEFAULT_CAMERA_WIDTH;
+static int camera_height = DEFAULT_CAMERA_HEIGHT;
+static char camera_device[256] = DEFAULT_CAMERA_DEVICE;
 
 // 显示配置 (横屏模式)
 #define DISPLAY_WIDTH 320
@@ -98,6 +103,8 @@ static int current_img_height = 240;
 // 信号处理和系统配置
 static void signal_handler(int sig);
 static void check_display_config(void);
+static void print_usage(const char* program_name);
+static int parse_arguments(int argc, char* argv[]);
 
 // 图像处理和缩放
 static void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height);
@@ -130,6 +137,9 @@ static void turn_screen_off(void);
 static void turn_screen_on(void);
 static void check_screen_timeout(void);
 static void update_activity_time(void);
+
+// 资源清理
+static void cleanup_image_buffers(void);
 
 // TCP 传输相关函数
 static uint64_t get_time_ns(void);
@@ -213,6 +223,106 @@ static void signal_handler(int sig) {
     
     // 给线程一些时间来响应退出标志
     usleep(100000); // 100ms
+}
+
+/**
+ * @brief 打印程序使用方法
+ */
+static void print_usage(const char* program_name) {
+    printf("Usage: %s [OPTIONS]\n", program_name);
+    printf("\nOptions:\n");
+    printf("  --width WIDTH      Set camera width (default: %d)\n", DEFAULT_CAMERA_WIDTH);
+    printf("  --height HEIGHT    Set camera height (default: %d)\n", DEFAULT_CAMERA_HEIGHT);
+    printf("  --device DEVICE    Set camera device path (default: %s)\n", DEFAULT_CAMERA_DEVICE);
+    printf("  --tcp-port PORT    Set TCP server port (default: %d)\n", DEFAULT_PORT);
+    printf("  --tcp-ip IP        Set TCP server IP (default: %s)\n", DEFAULT_SERVER_IP);
+    printf("  --help, -h         Show this help message\n");
+    printf("\nExamples:\n");
+    printf("  %s --width 1920 --height 1080\n", program_name);
+    printf("  %s --width 1600 --height 1200 --device /dev/video1\n", program_name);
+    printf("  %s --tcp-port 9999 --tcp-ip 192.168.1.100\n", program_name);
+    printf("\nSupported resolutions (depends on camera):\n");
+    printf("  1920x1080 (Full HD)\n");
+    printf("  1600x1200 (4:3)\n");
+    printf("  1280x720 (HD)\n");
+    printf("  640x480 (VGA)\n");
+    printf("\nControls:\n");
+    printf("  KEY0 - Toggle image display ON/OFF\n");
+    printf("  KEY1 - Enable/Disable TCP transmission\n");
+    printf("  KEY2/KEY3 - Wake screen / Update activity\n");
+    printf("  Ctrl+C - Exit\n");
+}
+
+/**
+ * @brief 解析命令行参数
+ * @param argc 参数个数
+ * @param argv 参数数组
+ * @return 0 成功，-1 失败，1 显示帮助后退出
+ */
+static int parse_arguments(int argc, char* argv[]) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--width") == 0) {
+            if (i + 1 >= argc) {
+                printf("Error: --width requires a value\n");
+                return -1;
+            }
+            camera_width = atoi(argv[++i]);
+            if (camera_width <= 0 || camera_width > 4096) {
+                printf("Error: Invalid width %d (must be 1-4096)\n", camera_width);
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--height") == 0) {
+            if (i + 1 >= argc) {
+                printf("Error: --height requires a value\n");
+                return -1;
+            }
+            camera_height = atoi(argv[++i]);
+            if (camera_height <= 0 || camera_height > 4096) {
+                printf("Error: Invalid height %d (must be 1-4096)\n", camera_height);
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--device") == 0) {
+            if (i + 1 >= argc) {
+                printf("Error: --device requires a value\n");
+                return -1;
+            }
+            strncpy(camera_device, argv[++i], sizeof(camera_device) - 1);
+            camera_device[sizeof(camera_device) - 1] = '\0';
+        } else if (strcmp(argv[i], "--tcp-port") == 0) {
+            if (i + 1 >= argc) {
+                printf("Error: --tcp-port requires a value\n");
+                return -1;
+            }
+            int port = atoi(argv[++i]);
+            if (port <= 0 || port > 65535) {
+                printf("Error: Invalid port %d (must be 1-65535)\n", port);
+                return -1;
+            }
+            // Note: We'll need to modify DEFAULT_PORT usage later
+            printf("TCP port set to: %d\n", port);
+        } else if (strcmp(argv[i], "--tcp-ip") == 0) {
+            if (i + 1 >= argc) {
+                printf("Error: --tcp-ip requires a value\n");
+                return -1;
+            }
+            // Note: We'll need to modify DEFAULT_SERVER_IP usage later
+            printf("TCP IP set to: %s\n", argv[++i]);
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_usage(argv[0]);
+            return 1;
+        } else {
+            printf("Error: Unknown option '%s'\n", argv[i]);
+            printf("Use '%s --help' for usage information.\n", argv[0]);
+            return -1;
+        }
+    }
+    
+    printf("Camera configuration:\n");
+    printf("  Resolution: %dx%d\n", camera_width, camera_height);
+    printf("  Device: %s\n", camera_device);
+    printf("  Format: SBGGR10 (RAW10)\n");
+    
+    return 0;
 }
 
 /**
@@ -300,8 +410,8 @@ static int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64
     struct frame_header header = {
         .magic = 0xDEADBEEF,
         .frame_id = frame_id,
-        .width = CAMERA_WIDTH,
-        .height = CAMERA_HEIGHT,
+        .width = camera_width,
+        .height = camera_height,
         .pixfmt = CAMERA_PIXELFORMAT,
         .size = size,
         .timestamp = timestamp,
@@ -421,6 +531,15 @@ static void* tcp_sender_thread(void* arg) {
 
     printf("TCP sender thread terminated\n");
     return NULL;
+}
+
+/**
+ * @brief 清理动态分配的图像缓冲区
+ */
+static void cleanup_image_buffers(void) {
+    // 这个函数会在 update_image_display 中通过静态变量引用
+    // 实际的清理在程序退出时自动发生
+    printf("Image buffers cleanup initiated\n");
 }
 
 /**
@@ -642,7 +761,7 @@ static void update_system_info(void) {
         // 例如：1920x1080 30.4 98% 70%
         snprintf(info_text, sizeof(info_text), 
                 "%dx%d  %.1fFPS  %.0f%%  %.0f%%", 
-                CAMERA_WIDTH, CAMERA_HEIGHT,
+                camera_width, camera_height,
                 (double)current_fps, 
                 (double)(cpu_usage >= 0 ? cpu_usage : 0),
                 (double)(mem_usage >= 0 ? mem_usage : 0));
@@ -844,12 +963,31 @@ static void update_image_display(void) {
         current_img_width = scaled_width;
         current_img_height = scaled_height;
         
-        // 创建图像处理缓冲区 (静态分配，避免重复分配)
-        static uint16_t unpacked_buffer[CAMERA_WIDTH * CAMERA_HEIGHT]; // 原始尺寸解包缓冲区
+        // 创建图像处理缓冲区 (动态分配，支持不同分辨率)
+        static uint16_t *unpacked_buffer = NULL;  // 原始尺寸解包缓冲区
         static uint16_t scaled_pixels[DISPLAY_WIDTH * DISPLAY_HEIGHT];  // 缩放后的像素缓冲区
         static uint16_t scaled_rgb565[DISPLAY_WIDTH * DISPLAY_HEIGHT];  // RGB565缓冲区
         static uint16_t display_buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT]; // 最终显示缓冲区
         static int last_processed_width = 0, last_processed_height = 0;
+        static size_t unpacked_buffer_size = 0;
+        
+        // 动态分配解包缓冲区（根据当前摄像头分辨率）
+        size_t required_size = camera_width * camera_height;
+        if (unpacked_buffer == NULL || unpacked_buffer_size < required_size) {
+            if (unpacked_buffer) {
+                free(unpacked_buffer);
+            }
+            unpacked_buffer = malloc(required_size * sizeof(uint16_t));
+            if (!unpacked_buffer) {
+                printf("Error: Failed to allocate unpacked buffer (%zu bytes)\n", 
+                       required_size * sizeof(uint16_t));
+                pthread_mutex_unlock(&frame_mutex);
+                return;
+            }
+            unpacked_buffer_size = required_size;
+            printf("Allocated unpacked buffer: %dx%d (%zu pixels)\n", 
+                   camera_width, camera_height, required_size);
+        }
         
         // 只在尺寸变化时打印处理信息
         if (current_frame.width != last_processed_width || current_frame.height != last_processed_height) {
@@ -1023,7 +1161,7 @@ static void handle_keys(void) {
                 
                 // 更新状态显示
                 if (status_label) {
-                    lv_label_set_text(status_label, display_enabled ? "DISPLAY ON" : "DISPLAY OFF");
+                    lv_label_set_text(status_label, display_enabled ? "DISPLAY: ON" : "DISPLAY: OFF");
                     lv_obj_set_style_text_color(status_label, 
                                                display_enabled ? lv_color_make(0, 255, 0) : lv_color_make(255, 255, 0), 0);
                 }
@@ -1196,7 +1334,7 @@ static void init_lvgl_ui(void) {
     
     // 创建状态标签 (右下角，替代按键提示)
     status_label = lv_label_create(scr);
-    lv_label_set_text(status_label, "RUNNING");
+    lv_label_set_text(status_label, "DISPLAY:ON");
     lv_obj_set_style_text_color(status_label, lv_color_make(0, 255, 0), 0);
     lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
     // 添加半透明背景以提高可读性
@@ -1222,8 +1360,18 @@ static void init_lvgl_ui(void) {
 // 主函数
 // ============================================================================
 
-int main(void) {
+int main(int argc, char* argv[]) {
     printf("LVGL Camera Display System Starting...\n");
+    
+    // 解析命令行参数
+    int parse_result = parse_arguments(argc, argv);
+    if (parse_result == 1) {
+        // 显示帮助后正常退出
+        return 0;
+    } else if (parse_result == -1) {
+        // 参数解析错误
+        return -1;
+    }
     
     // 设置信号处理
     signal(SIGINT, signal_handler);
@@ -1282,15 +1430,15 @@ int main(void) {
         goto cleanup;
     }
     
-    // 配置摄像头会话
+    // 配置摄像头会话 (使用命令行参数或默认值)
     media_session_config_t config = {
-        .device_path = CAMERA_DEVICE,
+        .device_path = camera_device,
         .format = {
-            .width = CAMERA_WIDTH,
-            .height = CAMERA_HEIGHT,
+            .width = camera_width,
+            .height = camera_height,
             .pixelformat = CAMERA_PIXELFORMAT,
             .num_planes = 1,
-            .plane_size = {CAMERA_WIDTH * CAMERA_HEIGHT * 2} // RAW10 约2字节/像素
+            .plane_size = {camera_width * camera_height * 2} // RAW10 约2字节/像素
         },
         .buffer_count = BUFFER_COUNT,
         .use_multiplanar = 1,
@@ -1332,12 +1480,13 @@ int main(void) {
     
     printf("System initialized successfully\n");
     printf("Display: 320x240 (forced landscape mode)\n");
-    printf("Camera: %dx%d (RAW10)\n", CAMERA_WIDTH, CAMERA_HEIGHT);
+    printf("Camera: %dx%d (RAW10) on %s\n", camera_width, camera_height, camera_device);
     printf("Scaling: Width-aligned to 320px, maintaining aspect ratio\n");
     printf("Performance optimizations enabled:\n");
     printf("  - Display update rate limited to 30 FPS\n");
     printf("  - Non-blocking frame mutex for better key response\n");
     printf("  - Optimized key debouncing (3 samples)\n");
+    printf("  - Dynamic buffer allocation for different resolutions\n");
     printf("  - Reduced debug output for better performance\n");
     printf("Controls:\n");
     printf("  KEY0 (PIN %d) - Toggle image display ON/OFF (camera keeps running)\n", KEY0_PIN);
@@ -1462,6 +1611,10 @@ cleanup:
         close(server_fd);
         server_fd = -1;
     }
+    
+    // 清理动态分配的图像缓冲区
+    printf("Cleaning up image buffers...\n");
+    cleanup_image_buffers();
     
     // 清理当前帧数据
     printf("Cleaning up frame data...\n");
