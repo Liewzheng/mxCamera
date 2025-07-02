@@ -39,6 +39,27 @@
 #include "lvgl/lvgl.h"
 #include "fbtft_lcd.h"
 
+// TCP 传输相关数据结构 (参考 media_usb)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+
+/**
+ * @struct frame_header
+ * @brief 数据帧头部结构
+ */
+struct frame_header {
+    uint32_t magic;       /**< 魔数标识：0xDEADBEEF */
+    uint32_t frame_id;    /**< 帧序号 */
+    uint32_t width;       /**< 图像宽度 */
+    uint32_t height;      /**< 图像高度 */
+    uint32_t pixfmt;      /**< 像素格式 */
+    uint32_t size;        /**< 数据大小 */
+    uint64_t timestamp;   /**< 时间戳 */
+    uint32_t reserved[2]; /**< 保留字段 */
+} __attribute__((packed));
+
 // ============================================================================
 // 系统配置常量
 // ============================================================================
@@ -55,6 +76,12 @@
 // 显示配置 (横屏模式)
 #define DISPLAY_WIDTH 320
 #define DISPLAY_HEIGHT 240
+
+// TCP 传输配置 (参考 media_usb)
+#define DEFAULT_PORT 8888
+#define DEFAULT_SERVER_IP "172.32.0.93"
+#define HEADER_SIZE 32
+#define CHUNK_SIZE 65536
 
 // 动态图像尺寸 (根据摄像头宽高比计算)
 static int current_img_width = 320;
@@ -98,6 +125,12 @@ static void update_system_info(void);
 static void* camera_thread(void* arg);
 static void handle_keys(void);
 
+// TCP 传输相关函数
+static uint64_t get_time_ns(void);
+static int create_server(int port);
+static int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64_t timestamp);
+static void* tcp_sender_thread(void* arg);
+
 // ============================================================================
 // 全局变量
 // ============================================================================
@@ -105,6 +138,13 @@ static void handle_keys(void);
 // 系统状态
 static volatile int exit_flag = 0;
 static volatile int camera_paused = 0;
+static volatile int tcp_enabled = 0;
+
+// TCP 传输状态
+static volatile int client_connected = 0;
+static int server_fd = -1;
+static int client_fd = -1;
+static pthread_t tcp_thread_id;
 
 // 媒体会话
 static media_session_t* media_session = NULL;
@@ -113,6 +153,7 @@ static media_session_t* media_session = NULL;
 static lv_obj_t* img_canvas = NULL;
 static lv_obj_t* status_label = NULL;
 static lv_obj_t* info_label = NULL;
+static lv_obj_t* tcp_label = NULL;
 
 // 帧率统计
 static uint32_t frame_count = 0;
@@ -137,10 +178,19 @@ static int frame_available = 0;
 static void signal_handler(int sig) {
     printf("\nReceived signal %d, cleaning up...\n", sig);
     exit_flag = 1;
+    tcp_enabled = 0; // 停止TCP传输
     
     // 强制刷新输出缓冲区
     fflush(stdout);
     fflush(stderr);
+    
+    // 关闭TCP连接
+    if (client_connected && client_fd >= 0) {
+        shutdown(client_fd, SHUT_RDWR);
+    }
+    if (server_fd >= 0) {
+        shutdown(server_fd, SHUT_RDWR);
+    }
     
     // 通知所有等待线程
     pthread_mutex_lock(&frame_mutex);
@@ -170,6 +220,161 @@ static void check_display_config(void) {
     system("ls -la /sys/class/graphics/ 2>/dev/null || echo 'No graphics devices found'");
     
     printf("=== End Display Check ===\n");
+}
+
+/**
+ * @brief 获取高精度时间戳
+ */
+static uint64_t get_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/**
+ * @brief 创建TCP服务器
+ */
+static int create_server(int port) {
+    int fd;
+    struct sockaddr_in addr;
+    int opt = 1;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket failed");
+        return -1;
+    }
+
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt failed");
+        close(fd);
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(DEFAULT_SERVER_IP);
+    addr.sin_port = htons(port);
+
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind failed");
+        close(fd);
+        return -1;
+    }
+
+    if (listen(fd, 1) < 0) {
+        perror("listen failed");
+        close(fd);
+        return -1;
+    }
+
+    printf("TCP Server listening on %s:%d\n", DEFAULT_SERVER_IP, port);
+    return fd;
+}
+
+/**
+ * @brief 发送图像帧数据到客户端
+ */
+static int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64_t timestamp) {
+    struct frame_header header = {
+        .magic = 0xDEADBEEF,
+        .frame_id = frame_id,
+        .width = CAMERA_WIDTH,
+        .height = CAMERA_HEIGHT,
+        .pixfmt = CAMERA_PIXELFORMAT,
+        .size = size,
+        .timestamp = timestamp,
+        .reserved = {0, 0}
+    };
+
+    // 发送帧头
+    if (send(fd, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
+        return -1;
+    }
+
+    // 分块发送数据
+    size_t sent = 0;
+    uint8_t* ptr = (uint8_t*)data;
+
+    while (sent < size && !exit_flag) {
+        size_t to_send = (size - sent) > CHUNK_SIZE ? CHUNK_SIZE : (size - sent);
+        ssize_t result = send(fd, ptr + sent, to_send, MSG_NOSIGNAL);
+
+        if (result <= 0) {
+            return -1;
+        }
+
+        sent += result;
+    }
+
+    return 0;
+}
+
+/**
+ * @brief TCP数据发送线程函数
+ */
+static void* tcp_sender_thread(void* arg) {
+    (void)arg; // 避免未使用参数警告
+    printf("TCP sender thread started\n");
+    static uint32_t tcp_frame_counter = 0;
+
+    while (!exit_flag && tcp_enabled) {
+        // 等待客户端连接
+        if (!client_connected && tcp_enabled) {
+            struct sockaddr_in client_addr;
+            socklen_t client_len = sizeof(client_addr);
+
+            printf("Waiting for TCP client connection...\n");
+            client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+
+            if (client_fd < 0) {
+                if (!exit_flag && tcp_enabled) {
+                    perror("accept failed");
+                }
+                continue;
+            }
+
+            printf("TCP Client connected from %s\n", inet_ntoa(client_addr.sin_addr));
+            client_connected = 1;
+        }
+
+        // 等待新帧数据
+        pthread_mutex_lock(&frame_mutex);
+        while (current_frame.data == NULL && !exit_flag && tcp_enabled) {
+            struct timespec timeout;
+            clock_gettime(CLOCK_REALTIME, &timeout);
+            timeout.tv_sec += 1; // 1秒超时
+            pthread_cond_timedwait(&frame_ready, &frame_mutex, &timeout);
+        }
+
+        if (current_frame.data && !exit_flag && tcp_enabled && client_connected) {
+            // 发送原始RAW10帧数据
+            uint64_t timestamp = get_time_ns();
+            if (send_frame(client_fd, current_frame.data, current_frame.size,
+                          tcp_frame_counter++, timestamp) < 0) {
+                printf("TCP Client disconnected (frame %d)\n", tcp_frame_counter);
+                close(client_fd);
+                client_connected = 0;
+            }
+        }
+
+        pthread_mutex_unlock(&frame_mutex);
+        
+        // 如果TCP被禁用，退出循环
+        if (!tcp_enabled) {
+            break;
+        }
+        
+        usleep(1000); // 1ms
+    }
+
+    if (client_connected) {
+        close(client_fd);
+        client_connected = 0;
+    }
+
+    printf("TCP sender thread terminated\n");
+    return NULL;
 }
 
 /**
@@ -622,7 +827,8 @@ static void* camera_thread(void* arg) {
             frame_available = 1;
             frame_count++;
             
-            pthread_cond_signal(&frame_ready);
+            // 通知显示更新和TCP发送线程
+            pthread_cond_broadcast(&frame_ready);
             pthread_mutex_unlock(&frame_mutex);
             
             // 更新帧率
@@ -644,11 +850,13 @@ static void* camera_thread(void* arg) {
 // ============================================================================
 
 /**
- * @brief 处理按键输入 (优化响应速度)
+ * @brief 处理按键输入 (优化响应速度，添加KEY1控制TCP传输)
  */
 static void handle_keys(void) {
     static int last_key0_state = 1;
+    static int last_key1_state = 1;
     static int key0_debounce_count = 0;
+    static int key1_debounce_count = 0;
     static struct timeval last_key_check = {0};
     const int debounce_threshold = 3; // 降低去抖动阈值，提高响应速度
     
@@ -664,17 +872,18 @@ static void handle_keys(void) {
     }
     last_key_check = current_time;
     
-    // 读取 KEY0 状态
+    // 读取按键状态
     int current_key0 = GET_KEY0;
+    int current_key1 = GET_KEY1;
     
-    // 去抖动处理
+    // KEY0 去抖动处理 (摄像头暂停/恢复)
     if (current_key0 == last_key0_state) {
         key0_debounce_count = 0;
     } else {
         key0_debounce_count++;
         if (key0_debounce_count >= debounce_threshold) {
             if (last_key0_state == 1 && current_key0 == 0) {
-                // 按键按下事件
+                // KEY0 按下事件 - 摄像头暂停/恢复
                 camera_paused = !camera_paused;
                 
                 printf("Camera %s (Key response time optimized)\n", 
@@ -689,6 +898,65 @@ static void handle_keys(void) {
             }
             last_key0_state = current_key0;
             key0_debounce_count = 0;
+        }
+    }
+    
+    // KEY1 去抖动处理 (TCP传输开关)
+    if (current_key1 == last_key1_state) {
+        key1_debounce_count = 0;
+    } else {
+        key1_debounce_count++;
+        if (key1_debounce_count >= debounce_threshold) {
+            if (last_key1_state == 1 && current_key1 == 0) {
+                // KEY1 按下事件 - TCP传输开关
+                tcp_enabled = !tcp_enabled;
+                
+                printf("TCP transmission %s\n", tcp_enabled ? "ENABLED" : "DISABLED");
+                
+                if (tcp_enabled) {
+                    // 启动TCP传输
+                    if (server_fd < 0) {
+                        server_fd = create_server(DEFAULT_PORT);
+                        if (server_fd >= 0) {
+                            if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0) {
+                                printf("TCP server started successfully\n");
+                                // 更新TCP状态显示
+                                if (tcp_label) {
+                                    lv_label_set_text(tcp_label, "TCP: ON");
+                                    lv_obj_set_style_text_color(tcp_label, lv_color_make(0, 255, 255), 0);
+                                }
+                            } else {
+                                printf("Failed to create TCP thread\n");
+                                close(server_fd);
+                                server_fd = -1;
+                                tcp_enabled = 0;
+                            }
+                        } else {
+                            printf("Failed to create TCP server\n");
+                            tcp_enabled = 0;
+                        }
+                    }
+                } else {
+                    // 停止TCP传输
+                    if (client_connected) {
+                        close(client_fd);
+                        client_connected = 0;
+                    }
+                    if (server_fd >= 0) {
+                        close(server_fd);
+                        server_fd = -1;
+                    }
+                    // 更新TCP状态显示
+                    if (tcp_label) {
+                        lv_label_set_text(tcp_label, "TCP: OFF");
+                        lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
+                    }
+                    // TCP线程会自动退出，因为tcp_enabled被设为false
+                    printf("TCP transmission stopped\n");
+                }
+            }
+            last_key1_state = current_key1;
+            key1_debounce_count = 0;
         }
     }
 }
@@ -729,7 +997,17 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_bg_color(status_label, lv_color_make(0, 0, 0), 0);
     lv_obj_set_style_bg_opa(status_label, LV_OPA_50, 0);
     lv_obj_set_style_pad_all(status_label, 2, 0);
-    lv_obj_align(status_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
+    lv_obj_align(status_label, LV_ALIGN_BOTTOM_RIGHT, -5, -25);
+    
+    // 创建TCP状态标签 (右下角，显示TCP传输状态)
+    tcp_label = lv_label_create(scr);
+    lv_label_set_text(tcp_label, "TCP: OFF");
+    lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
+    lv_obj_set_style_text_font(tcp_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(tcp_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(tcp_label, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(tcp_label, 2, 0);
+    lv_obj_align(tcp_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
     
     printf("LVGL UI initialized (landscape mode: %dx%d)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
@@ -854,7 +1132,9 @@ int main(void) {
     printf("  - Reduced debug output for better performance\n");
     printf("Controls:\n");
     printf("  KEY0 (PIN %d) - Pause/Resume camera\n", KEY0_PIN);
+    printf("  KEY1 (PIN %d) - Enable/Disable TCP transmission\n", KEY1_PIN);
     printf("  Ctrl+C - Exit\n");
+    printf("TCP Server: %s:%d (disabled by default)\n", DEFAULT_SERVER_IP, DEFAULT_PORT);
     
     // 主循环
     uint32_t loop_count = 0;
@@ -900,6 +1180,17 @@ int main(void) {
     
     printf("Main loop exited, shutting down...\n");
     
+    // 停止TCP传输
+    tcp_enabled = 0;
+    if (client_connected && client_fd >= 0) {
+        close(client_fd);
+        client_connected = 0;
+    }
+    if (server_fd >= 0) {
+        close(server_fd);
+        server_fd = -1;
+    }
+    
     // 确保停止媒体会话，避免阻塞
     printf("Stopping media session...\n");
     if (media_session) {
@@ -924,6 +1215,27 @@ int main(void) {
     }
     
 cleanup:
+    // 等待TCP线程结束
+    if (tcp_enabled) {
+        printf("Waiting for TCP thread to exit...\n");
+        tcp_enabled = 0;
+        pthread_cond_broadcast(&frame_ready);
+        void* tcp_ret;
+        if (pthread_join(tcp_thread_id, &tcp_ret) == 0) {
+            printf("TCP thread exited successfully\n");
+        }
+    }
+    
+    // 清理TCP资源
+    if (client_connected && client_fd >= 0) {
+        close(client_fd);
+        client_connected = 0;
+    }
+    if (server_fd >= 0) {
+        close(server_fd);
+        server_fd = -1;
+    }
+    
     // 清理当前帧数据
     printf("Cleaning up frame data...\n");
     pthread_mutex_lock(&frame_mutex);
