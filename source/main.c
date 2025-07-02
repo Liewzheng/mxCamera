@@ -216,7 +216,9 @@ static void update_fps(void) {
         
         // 更新 FPS 显示
         if (fps_label) {
-            lv_label_set_text_fmt(fps_label, "FPS: %.1f", (double)current_fps);
+            char fps_text[32];
+            snprintf(fps_text, sizeof(fps_text), "FPS: %.1f", (double)current_fps);
+            lv_label_set_text(fps_label, fps_text);
         }
     }
 }
@@ -373,8 +375,10 @@ static void update_image_display(void) {
             
             // 更新分辨率信息显示
             if (info_label) {
-                lv_label_set_text_fmt(info_label, "Cam: %dx%d", 
-                                     current_frame.width, current_frame.height);
+                char info_text[64];
+                snprintf(info_text, sizeof(info_text), "Cam: %dx%d", 
+                        current_frame.width, current_frame.height);
+                lv_label_set_text(info_label, info_text);
             }
             
             printf("Image updated: %dx%d -> %dx%d (landscape fit)\n", 
