@@ -87,13 +87,16 @@ check_tools() {
     CMAKE_VERSION=$(cmake --version | head -n1 | cut -d' ' -f3)
     print_status "CMake 版本: $CMAKE_VERSION"
     
-    # 检查 Make
-    if ! command -v make &> /dev/null; then
-        print_error "Make 未安装，请先安装 Make"
+    # 检查 Ninja
+    if ! command -v ninja &> /dev/null; then
+        print_error "Ninja 未安装，请先安装 Ninja"
+        print_error "Ubuntu/Debian: sudo apt install ninja-build"
+        print_error "CentOS/RHEL: sudo yum install ninja-build"
+        print_error "macOS: brew install ninja"
         exit 1
     fi
-    MAKE_VERSION=$(make --version | head -n1)
-    print_status "Make: $MAKE_VERSION"
+    NINJA_VERSION=$(ninja --version)
+    print_status "Ninja 版本: $NINJA_VERSION"
 }
 
 # 检查本地工具链
@@ -230,12 +233,11 @@ clean_build() {
 configure_cmake() {
     print_status "配置 CMake (构建类型: $BUILD_TYPE)..."
     
-    cd build
-    
     CMAKE_ARGS=(
+        -B build
+        -G Ninja
         -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-        ..
     )
     
     if [ "$VERBOSE" = true ]; then
@@ -248,30 +250,27 @@ configure_cmake() {
         print_error "CMake 配置失败"
         exit 1
     fi
-    
-    cd ..
 }
 
 # 编译项目
 build_project() {
     print_status "开始编译 (使用 $JOBS 个并行作业)..."
     
-    cd build
-    
-    MAKE_ARGS=(-j "$JOBS")
+    CMAKE_BUILD_ARGS=(
+        --build build
+        --parallel "$JOBS"
+    )
     
     if [ "$VERBOSE" = true ]; then
-        MAKE_ARGS+=(VERBOSE=1)
+        CMAKE_BUILD_ARGS+=(--verbose)
     fi
     
-    if make "${MAKE_ARGS[@]}"; then
+    if cmake "${CMAKE_BUILD_ARGS[@]}"; then
         print_success "编译成功!"
     else
         print_error "编译失败!"
         exit 1
     fi
-    
-    cd ..
 }
 
 # 显示编译结果

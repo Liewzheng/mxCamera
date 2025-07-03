@@ -78,6 +78,7 @@ foreach(SUBMODULE ${LIB_SUBMODULES})
         
         # 为子模块设置统一的工具链和输出目录
         set(SUBMODULE_CMAKE_ARGS
+            -G Ninja
             -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
             -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
             -DCMAKE_AR=${CMAKE_AR}
@@ -109,6 +110,7 @@ foreach(SUBMODULE ${LIB_SUBMODULES})
             SOURCE_DIR ${SUBMODULE_DIR}
             BINARY_DIR ${SUBMODULE_BUILD_DIR}
             CMAKE_ARGS ${SUBMODULE_CMAKE_ARGS}
+            BUILD_COMMAND cmake --build . --parallel
             BUILD_ALWAYS 1
             INSTALL_COMMAND ""  # 不执行安装，直接使用构建输出
         )
@@ -251,38 +253,6 @@ set(COMMON_FLAGS
 add_compile_options(${COMMON_FLAGS})
 
 # ============================================================================
-# 创建导入的动态库目标 - 指向将要编译生成的库文件
-# ============================================================================
-
-# libgpio
-add_library(gpio SHARED IMPORTED)
-set_target_properties(gpio PROPERTIES
-    IMPORTED_LOCATION ${LIBGPIO_LIB_DIR}/libgpio.so
-    INTERFACE_INCLUDE_DIRECTORIES ${LIBGPIO_INCLUDE_DIR}
-)
-
-# libMedia
-add_library(media SHARED IMPORTED)
-set_target_properties(media PROPERTIES
-    IMPORTED_LOCATION ${LIBMEDIA_LIB_DIR}/libmedia.so
-    INTERFACE_INCLUDE_DIRECTORIES ${LIBMEDIA_INCLUDE_DIR}
-)
-
-# libstaging
-add_library(staging SHARED IMPORTED)
-set_target_properties(staging PROPERTIES
-    IMPORTED_LOCATION ${LIBSTAGING_LIB_DIR}/libstaging.so
-    INTERFACE_INCLUDE_DIRECTORIES ${LIBSTAGING_INCLUDE_DIR}
-)
-
-# LVGL
-add_library(lvgl SHARED IMPORTED)
-set_target_properties(lvgl PROPERTIES
-    IMPORTED_LOCATION ${LVGL_LIB_DIR}/liblvgl.so
-    INTERFACE_INCLUDE_DIRECTORIES "${LVGL_DIR};${LVGL_DRIVERS_DIR};${LVGL_ROOT}"
-)
-
-# ============================================================================
 # 项目源文件
 # ============================================================================
 
@@ -313,15 +283,29 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${LVGL_ROOT}
 )
 
-# 链接库
-target_link_libraries(${PROJECT_NAME} 
-    gpio      # libgpio 动态库
-    media     # libMedia 动态库
-    staging   # libstaging 动态库 (fbtft_benchmark)
-    lvgl      # LVGL 动态库
-    m         # 数学库
-    pthread   # 线程库
+# 添加自定义依赖目标，确保库文件存在
+add_custom_target(all_libs_built
+    DEPENDS libgpio_build libmedia_build liblvgl_build libstaging_build
 )
+
+# 设置库文件的完整路径
+set(GPIO_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libgpio.so")
+set(MEDIA_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libmedia.so")
+set(STAGING_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libstaging.so")
+set(LVGL_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/liblvgl.so")
+
+# 链接库 - 使用完整路径
+target_link_libraries(${PROJECT_NAME} 
+    ${GPIO_LIBRARY}      # libgpio 动态库
+    ${MEDIA_LIBRARY}     # libMedia 动态库
+    ${STAGING_LIBRARY}   # libstaging 动态库 (fbtft_benchmark)
+    ${LVGL_LIBRARY}      # LVGL 动态库
+    m                    # 数学库
+    pthread              # 线程库
+)
+
+# 确保主项目在所有库编译完成后才编译
+add_dependencies(${PROJECT_NAME} all_libs_built)
 
 # 设置可执行文件属性
 set_target_properties(${PROJECT_NAME} PROPERTIES
