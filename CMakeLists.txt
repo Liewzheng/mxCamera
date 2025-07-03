@@ -54,10 +54,10 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/lib)
 
 # ============================================================================
-# 子模块编译配置
+# 子模块库文件配置 - 使用预编译的库文件
 # ============================================================================
 
-# 定义所有需要编译的 lib 子模块
+# 定义库文件路径 - 假设已经通过 build.sh 预编译完成
 set(LIB_SUBMODULES
     libgpio
     libmedia
@@ -65,63 +65,22 @@ set(LIB_SUBMODULES
     libstaging
 )
 
-# 为所有子模块设置统一的编译配置
+# 检查预编译的库文件是否存在
 foreach(SUBMODULE ${LIB_SUBMODULES})
-    set(SUBMODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${SUBMODULE}")
+    set(LIB_NAME "${SUBMODULE}")
+    string(REGEX REPLACE "^lib" "" LIB_SHORT_NAME "${LIB_NAME}")
+    set(LIB_FILE "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/lib${LIB_SHORT_NAME}.so")
     
-    if(EXISTS "${SUBMODULE_DIR}/CMakeLists.txt")
-        message(STATUS "配置子模块: ${SUBMODULE}")
-        
-        # 创建子模块的构建目录
-        set(SUBMODULE_BUILD_DIR "${CMAKE_BINARY_DIR}/${SUBMODULE}")
-        file(MAKE_DIRECTORY ${SUBMODULE_BUILD_DIR})
-        
-        # 为子模块设置统一的工具链和输出目录
-        set(SUBMODULE_CMAKE_ARGS
-            -G Ninja
-            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-            -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-            -DCMAKE_AR=${CMAKE_AR}
-            -DCMAKE_STRIP=${CMAKE_STRIP}
-            -DCMAKE_NM=${CMAKE_NM}
-            -DCMAKE_OBJCOPY=${CMAKE_OBJCOPY}
-            -DCMAKE_OBJDUMP=${CMAKE_OBJDUMP}
-            -DCMAKE_SYSTEM_NAME=Linux
-            -DCMAKE_SYSTEM_PROCESSOR=arm
-            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
-            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
-            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
-        )
-        
-        # 特殊处理某些子模块的额外参数
-        if(${SUBMODULE} STREQUAL "libgpio")
-            list(APPEND SUBMODULE_CMAKE_ARGS -DENABLE_CROSS_COMPILE=ON)
-        elseif(${SUBMODULE} STREQUAL "libmedia")
-            list(APPEND SUBMODULE_CMAKE_ARGS -DENABLE_CROSS_COMPILE=ON)
-        endif()
-        
-        # 使用 ExternalProject 编译子模块
-        include(ExternalProject)
-        ExternalProject_Add(${SUBMODULE}_build
-            SOURCE_DIR ${SUBMODULE_DIR}
-            BINARY_DIR ${SUBMODULE_BUILD_DIR}
-            CMAKE_ARGS ${SUBMODULE_CMAKE_ARGS}
-            BUILD_COMMAND cmake --build . --parallel
-            BUILD_ALWAYS 1
-            INSTALL_COMMAND ""  # 不执行安装，直接使用构建输出
-        )
-        
-        # 记录子模块信息用于后续依赖
-        set(${SUBMODULE}_BUILT_DIR ${SUBMODULE_BUILD_DIR})
-        
+    if(NOT EXISTS "${LIB_FILE}")
+        message(WARNING "预编译库文件不存在: ${LIB_FILE}")
+        message(WARNING "请先运行 build.sh 编译所有子模块")
     else()
-        message(WARNING "子模块 ${SUBMODULE} 的 CMakeLists.txt 不存在")
+        message(STATUS "找到预编译库: ${LIB_FILE}")
     endif()
 endforeach()
+
+# 为子模块设置统一的输出目录变量，供子模块使用
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_FOR_SUBMODULES ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
 
 # ============================================================================
 # 依赖库路径配置
@@ -264,14 +223,6 @@ file(GLOB PROJECT_SOURCES
 # 创建可执行文件
 add_executable(${PROJECT_NAME} ${PROJECT_SOURCES})
 
-# 添加子模块依赖 - 确保子模块先编译完成
-add_dependencies(${PROJECT_NAME} 
-    libgpio_build
-    libmedia_build
-    liblvgl_build
-    libstaging_build
-)
-
 # 设置包含目录
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${PROJECT_INCLUDE_DIR}
@@ -283,29 +234,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${LVGL_ROOT}
 )
 
-# 添加自定义依赖目标，确保库文件存在
-add_custom_target(all_libs_built
-    DEPENDS libgpio_build libmedia_build liblvgl_build libstaging_build
-)
-
-# 设置库文件的完整路径
-set(GPIO_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libgpio.so")
-set(MEDIA_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libmedia.so")
-set(STAGING_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libstaging.so")
-set(LVGL_LIBRARY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/liblvgl.so")
-
-# 链接库 - 使用完整路径
+# 链接库 - 直接使用预编译的库文件
 target_link_libraries(${PROJECT_NAME} 
-    ${GPIO_LIBRARY}      # libgpio 动态库
-    ${MEDIA_LIBRARY}     # libMedia 动态库
-    ${STAGING_LIBRARY}   # libstaging 动态库 (fbtft_benchmark)
-    ${LVGL_LIBRARY}      # LVGL 动态库
-    m                    # 数学库
-    pthread              # 线程库
+    ${LIBGPIO_LIB_DIR}/libgpio.so      # libgpio 动态库
+    ${LIBMEDIA_LIB_DIR}/libmedia.so    # libMedia 动态库
+    ${LIBSTAGING_LIB_DIR}/libstaging.so # libstaging 动态库 (fbtft_benchmark)
+    ${LVGL_LIB_DIR}/liblvgl.so         # LVGL 动态库
+    m                                   # 数学库
+    pthread                            # 线程库
 )
-
-# 确保主项目在所有库编译完成后才编译
-add_dependencies(${PROJECT_NAME} all_libs_built)
 
 # 设置可执行文件属性
 set_target_properties(${PROJECT_NAME} PROPERTIES

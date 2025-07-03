@@ -87,16 +87,13 @@ check_tools() {
     CMAKE_VERSION=$(cmake --version | head -n1 | cut -d' ' -f3)
     print_status "CMake 版本: $CMAKE_VERSION"
     
-    # 检查 Ninja
-    if ! command -v ninja &> /dev/null; then
-        print_error "Ninja 未安装，请先安装 Ninja"
-        print_error "Ubuntu/Debian: sudo apt install ninja-build"
-        print_error "CentOS/RHEL: sudo yum install ninja-build"
-        print_error "macOS: brew install ninja"
+    # 检查 Make
+    if ! command -v make &> /dev/null; then
+        print_error "Make 未安装，请先安装 Make"
         exit 1
     fi
-    NINJA_VERSION=$(ninja --version)
-    print_status "Ninja 版本: $NINJA_VERSION"
+    MAKE_VERSION=$(make --version | head -n1)
+    print_status "Make: $MAKE_VERSION"
 }
 
 # 检查本地工具链
@@ -229,15 +226,99 @@ clean_build() {
     fi
 }
 
+# 编译子模块
+build_submodules() {
+    print_status "开始编译所有子模块..."
+    
+    LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging")
+    TOOLCHAIN_PREFIX_PATH="$PROJECT_ROOT/toolchains"
+    
+    for SUBMODULE in "${LIB_SUBMODULES[@]}"; do
+        SUBMODULE_DIR="$PROJECT_ROOT/$SUBMODULE"
+        SUBMODULE_BUILD_DIR="$PROJECT_ROOT/build/$SUBMODULE"
+        
+        if [ ! -d "$SUBMODULE_DIR" ] || [ ! -f "$SUBMODULE_DIR/CMakeLists.txt" ]; then
+            print_warning "跳过 $SUBMODULE: 目录或 CMakeLists.txt 不存在"
+            continue
+        fi
+        
+        print_status "编译子模块: $SUBMODULE"
+        
+        # 清理并创建子模块构建目录
+        rm -rf "$SUBMODULE_BUILD_DIR"
+        mkdir -p "$SUBMODULE_BUILD_DIR"
+        
+        # 进入子模块构建目录
+        cd "$SUBMODULE_BUILD_DIR"
+        
+        # 配置子模块CMake，传递工具链参数
+        CMAKE_SUBMODULE_ARGS=(
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+            -DCMAKE_C_COMPILER="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-gcc"
+            -DCMAKE_CXX_COMPILER="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-g++"
+            -DCMAKE_AR="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-ar"
+            -DCMAKE_STRIP="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-strip"
+            -DCMAKE_NM="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-nm"
+            -DCMAKE_OBJCOPY="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-objcopy"
+            -DCMAKE_OBJDUMP="$TOOLCHAIN_PREFIX_PATH/bin/arm-rockchip830-linux-uclibcgnueabihf-objdump"
+            -DCMAKE_SYSTEM_NAME=Linux
+            -DCMAKE_SYSTEM_PROCESSOR=arm
+            -DTOOLCHAIN_PREFIX="$TOOLCHAIN_PREFIX_PATH"
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY="$PROJECT_ROOT/build/lib"
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY_FOR_SUBMODULES="$PROJECT_ROOT/build/lib"
+            "$SUBMODULE_DIR"
+        )
+        
+        if [ "$VERBOSE" = true ]; then
+            CMAKE_SUBMODULE_ARGS+=(-DCMAKE_VERBOSE_MAKEFILE=ON)
+        fi
+        
+        # 配置子模块
+        if cmake "${CMAKE_SUBMODULE_ARGS[@]}"; then
+            print_status "$SUBMODULE: CMake 配置成功"
+        else
+            print_error "$SUBMODULE: CMake 配置失败"
+            cd "$PROJECT_ROOT"
+            exit 1
+        fi
+        
+        # 编译子模块
+        MAKE_SUBMODULE_ARGS=(-j "$JOBS")
+        if [ "$VERBOSE" = true ]; then
+            MAKE_SUBMODULE_ARGS+=(VERBOSE=1)
+        fi
+        
+        if make "${MAKE_SUBMODULE_ARGS[@]}"; then
+            print_success "$SUBMODULE: 编译成功"
+        else
+            print_error "$SUBMODULE: 编译失败"
+            cd "$PROJECT_ROOT"
+            exit 1
+        fi
+        
+        # 返回项目根目录
+        cd "$PROJECT_ROOT"
+    done
+    
+    print_success "所有子模块编译完成"
+    
+    # 显示编译结果
+    print_status "子模块库文件:"
+    if [ -d "build/lib" ]; then
+        ls -la build/lib/
+    fi
+}
+
 # 配置 CMake
 configure_cmake() {
     print_status "配置 CMake (构建类型: $BUILD_TYPE)..."
     
+    cd build
+    
     CMAKE_ARGS=(
-        -B build
-        -G Ninja
         -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        ..
     )
     
     if [ "$VERBOSE" = true ]; then
@@ -250,27 +331,30 @@ configure_cmake() {
         print_error "CMake 配置失败"
         exit 1
     fi
+    
+    cd ..
 }
 
 # 编译项目
 build_project() {
     print_status "开始编译 (使用 $JOBS 个并行作业)..."
     
-    CMAKE_BUILD_ARGS=(
-        --build build
-        --parallel "$JOBS"
-    )
+    cd build
+    
+    MAKE_ARGS=(-j "$JOBS")
     
     if [ "$VERBOSE" = true ]; then
-        CMAKE_BUILD_ARGS+=(--verbose)
+        MAKE_ARGS+=(VERBOSE=1)
     fi
     
-    if cmake "${CMAKE_BUILD_ARGS[@]}"; then
+    if make "${MAKE_ARGS[@]}"; then
         print_success "编译成功!"
     else
         print_error "编译失败!"
         exit 1
     fi
+    
+    cd ..
 }
 
 # 显示编译结果
@@ -344,8 +428,9 @@ main() {
     check_submodules
     
     clean_build
-    configure_cmake
-    build_project
+    build_submodules    # 先编译所有子模块
+    configure_cmake     # 再配置主项目
+    build_project       # 最后编译主项目
     show_results
     
     print_success "集成编译脚本执行完成!"
