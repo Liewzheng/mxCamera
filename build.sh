@@ -3,6 +3,39 @@
 # mxCamera 集成编译脚本
 # 编译所有 lib 开头的子模块并统一输出到 mxCamera/build/lib
 
+# ============================================================================
+# 系统兼容性检查
+# ============================================================================
+
+# 检查操作系统类型
+check_system_compatibility() {
+    local os_type=$(uname -s)
+    local arch_type=$(uname -m)
+    
+    # 检查操作系统是否为 Linux
+    if [ "$os_type" != "Linux" ]; then
+        echo "错误: 此脚本仅支持 Linux 系统运行"
+        echo "当前系统: $os_type"
+        echo "支持系统: Linux"
+        exit 1
+    fi
+    
+    # 检查架构是否为 x86_64
+    if [ "$arch_type" != "x86_64" ]; then
+        echo "错误: 此脚本仅支持 x86_64 架构运行"
+        echo "当前架构: $arch_type"
+        echo "支持架构: x86_64"
+        echo ""
+        echo "说明: 本脚本用于在 x86_64 Linux 主机上交叉编译 ARM 目标程序"
+        exit 1
+    fi
+    
+    echo "系统兼容性检查通过: $os_type $arch_type"
+}
+
+# 执行系统兼容性检查
+check_system_compatibility
+
 echo "=== mxCamera 集成编译脚本 ==="
 
 # 获取项目根目录绝对路径
