@@ -1,0 +1,15 @@
+[submodule "toolchains"]
+	path = toolchains
+	url = https://github.com/Liewzheng/arm-rockchip830-linux-uclibcgnueabihf
+[submodule "liblvgl"]
+	path = liblvgl
+	url = https://github.com/Liewzheng/liblvgl_for_luckfox_pico
+[submodule "libmedia"]
+	path = libmedia
+	url = https://github.com/Liewzheng/libmedia_for_luckfox_pico
+[submodule "libgpio"]
+	path = libgpio
+	url = https://github.com/Liewzheng/libgpio_for_luckfox_pico
+[submodule "libstaging"]
+	path = libstaging
+	url = https://github.com/Liewzheng/libstaging_for_luckfox_pico
