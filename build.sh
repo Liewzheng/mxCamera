@@ -184,18 +184,100 @@ check_tools() {
 
 # 检查本地工具链
 check_toolchain() {
+    print_status "检查交叉编译工具链..."
+    
     TOOLCHAIN_PREFIX="$PROJECT_ROOT/toolchains/bin/arm-rockchip830-linux-uclibcgnueabihf-"
     
-    if [ ! -f "${TOOLCHAIN_PREFIX}gcc" ]; then
-        print_error "找不到本地交叉编译工具链"
-        print_error "请检查路径: ${TOOLCHAIN_PREFIX}gcc"
-        print_error "确保 toolchains/ 目录已正确设置"
+    # 检查工具链目录是否存在
+    if [ ! -d "$PROJECT_ROOT/toolchains" ]; then
+        print_error "工具链目录不存在: $PROJECT_ROOT/toolchains"
+        print_error "这通常表示 toolchains 子模块未正确拉取"
+        
+        # 检查是否在 git 仓库中
+        if [ -d ".git" ] && [ -f ".gitmodules" ]; then
+            print_status "=== 诊断信息 ==="
+            echo "检查子模块状态:"
+            git submodule status | grep toolchains || echo "  未找到 toolchains 子模块定义"
+            
+            print_status "=== 建议的解决方案 ==="
+            echo "1. 检查 .gitmodules 文件是否包含 toolchains 子模块"
+            echo "2. 手动拉取工具链子模块:"
+            echo "   git submodule update --init --recursive toolchains"
+            echo "3. 如果问题持续存在，请检查子模块 URL 配置"
+        else
+            print_status "=== 建议的解决方案 ==="
+            echo "1. 确保已克隆完整的项目仓库"
+            echo "2. 检查 toolchains/ 目录是否存在于项目根目录"
+            echo "3. 如果工具链是单独提供的，请将其解压到 toolchains/ 目录"
+        fi
+        
         exit 1
     fi
     
-    TOOLCHAIN_VERSION=$(${TOOLCHAIN_PREFIX}gcc --version | head -n1)
-    print_status "工具链: $TOOLCHAIN_VERSION"
-    print_status "工具链路径: $PROJECT_ROOT/toolchains/"
+    # 检查工具链可执行文件
+    if [ ! -f "${TOOLCHAIN_PREFIX}gcc" ]; then
+        print_error "找不到交叉编译工具链可执行文件"
+        print_error "期望路径: ${TOOLCHAIN_PREFIX}gcc"
+        
+        # 显示 toolchains 目录内容以便诊断
+        print_status "=== toolchains 目录内容 ==="
+        if [ -d "$PROJECT_ROOT/toolchains/bin" ]; then
+            echo "bin/ 目录内容:"
+            ls -la "$PROJECT_ROOT/toolchains/bin/" | head -10
+        else
+            echo "bin/ 目录不存在"
+            echo "toolchains/ 目录内容:"
+            ls -la "$PROJECT_ROOT/toolchains/" | head -10
+        fi
+        
+        print_status "=== 建议的解决方案 ==="
+        echo "1. 检查工具链文件是否正确解压"
+        echo "2. 确保工具链文件有执行权限:"
+        echo "   chmod +x $PROJECT_ROOT/toolchains/bin/*"
+        echo "3. 检查工具链文件名是否正确"
+        echo "4. 如果使用的是不同的工具链，请更新脚本中的工具链路径"
+        
+        exit 1
+    fi
+    
+    # 检查工具链文件权限
+    if [ ! -x "${TOOLCHAIN_PREFIX}gcc" ]; then
+        print_warning "工具链文件没有执行权限，正在设置..."
+        chmod +x "$PROJECT_ROOT/toolchains/bin/"* || {
+            print_error "无法设置工具链执行权限"
+            exit 1
+        }
+        print_success "工具链执行权限设置完成"
+    fi
+    
+    # 获取并显示工具链信息
+    TOOLCHAIN_VERSION=$(${TOOLCHAIN_PREFIX}gcc --version 2>/dev/null | head -n1)
+    if [ $? -eq 0 ]; then
+        print_success "工具链验证成功"
+        print_status "工具链版本: $TOOLCHAIN_VERSION"
+        print_status "工具链路径: $PROJECT_ROOT/toolchains/"
+        
+        # 显示目标架构信息
+        TARGET_ARCH=$(${TOOLCHAIN_PREFIX}gcc -dumpmachine 2>/dev/null)
+        if [ $? -eq 0 ]; then
+            print_status "目标架构: $TARGET_ARCH"
+        fi
+    else
+        print_error "工具链可执行但运行失败"
+        print_error "这可能是架构不兼容或依赖库缺失的问题"
+        
+        print_status "=== 诊断信息 ==="
+        echo "文件信息:"
+        file "${TOOLCHAIN_PREFIX}gcc"
+        
+        print_status "=== 建议的解决方案 ==="
+        echo "1. 检查主机架构是否与工具链兼容"
+        echo "2. 安装必要的 32 位库（如果工具链是 32 位的）:"
+        echo "   sudo apt install libc6:i386 libncurses5:i386 libstdc++6:i386"
+        echo "3. 尝试运行: ldd ${TOOLCHAIN_PREFIX}gcc"
+        
+        exit 1
+    fi
 }
 
 # 检查并自动初始化子模块
@@ -873,8 +955,8 @@ main() {
     echo ""
     
     check_tools
-    check_toolchain
     check_and_init_submodules
+    check_toolchain
     prepare_lvgl
     check_submodules
     
