@@ -165,21 +165,79 @@ done
 check_tools() {
     print_status "检查编译工具..."
     
+    local missing_tools=()
+    
     # 检查 CMake
     if ! command -v cmake &> /dev/null; then
-        print_error "CMake 未安装，请先安装 CMake"
-        exit 1
+        print_error "CMake 未安装"
+        missing_tools+=("cmake")
+    else
+        CMAKE_VERSION=$(cmake --version | head -n1 | cut -d' ' -f3)
+        print_status "CMake 版本: $CMAKE_VERSION"
     fi
-    CMAKE_VERSION=$(cmake --version | head -n1 | cut -d' ' -f3)
-    print_status "CMake 版本: $CMAKE_VERSION"
     
     # 检查 Make
     if ! command -v make &> /dev/null; then
-        print_error "Make 未安装，请先安装 Make"
+        print_error "Make 未安装"
+        missing_tools+=("make")
+    else
+        MAKE_VERSION=$(make --version | head -n1)
+        print_status "Make: $MAKE_VERSION"
+    fi
+    
+    # 检查 Git
+    if ! command -v git &> /dev/null; then
+        print_error "Git 未安装"
+        missing_tools+=("git")
+    else
+        GIT_VERSION=$(git --version)
+        print_status "$GIT_VERSION"
+    fi
+    
+    # 检查 zip
+    if ! command -v zip &> /dev/null; then
+        print_error "zip 未安装"
+        missing_tools+=("zip")
+    else
+        ZIP_VERSION=$(zip -v | head -n2 | tail -n1 | awk '{print $1, $2}')
+        print_status "zip 版本: $ZIP_VERSION"
+    fi
+    
+    # 如果有缺失的工具，提供安装指南并退出
+    if [ ${#missing_tools[@]} -gt 0 ]; then
+        echo ""
+        print_error "=== 缺失必要工具 ==="
+        echo ""
+        echo "以下工具未安装或不在 PATH 中："
+        for tool in "${missing_tools[@]}"; do
+            echo "  ❌ $tool"
+        done
+        echo ""
+        print_status "=== 安装指南 ==="
+        echo ""
+        echo "Ubuntu/Debian 系统："
+        echo "  sudo apt update"
+        echo "  sudo apt install -y cmake make git zip"
+        echo ""
+        echo "CentOS/RHEL 系统："
+        echo "  sudo yum install -y cmake make git zip"
+        echo "  # 或使用 dnf (较新版本):"
+        echo "  sudo dnf install -y cmake make git zip"
+        echo ""
+        echo "Arch Linux 系统："
+        echo "  sudo pacman -S cmake make git zip"
+        echo ""
+        echo "Alpine Linux 系统："
+        echo "  sudo apk add cmake make git zip"
+        echo ""
+        echo "Fedora 系统："
+        echo "  sudo dnf install -y cmake make git zip"
+        echo ""
+        print_status "安装完成后，请重新运行此脚本。"
         exit 1
     fi
-    MAKE_VERSION=$(make --version | head -n1)
-    print_status "Make: $MAKE_VERSION"
+    
+    print_success "所有必要工具检查通过"
 }
 
 # 检查本地工具链
@@ -816,14 +874,6 @@ show_results() {
 # 创建部署包
 create_deployment_package() {
     print_status "创建部署包..."
-    
-    # 检查zip命令是否存在
-    if ! command -v zip &> /dev/null; then
-        print_error "zip 命令未找到，请安装 zip 工具"
-        print_error "Ubuntu/Debian: sudo apt install zip"
-        print_error "CentOS/RHEL: sudo yum install zip"
-        exit 1
-    fi
     
     # 创建临时目录用于打包
     PACKAGE_DIR="$PROJECT_ROOT/build/package"
