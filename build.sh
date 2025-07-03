@@ -443,14 +443,22 @@ check_submodules() {
             continue
         fi
         
-        # 检查源代码目录
+        # 检查源代码目录 (liblvgl 是特殊情况)
         local has_source=false
-        for source_dir in "source" "src"; do
-            if [ -d "$SUBMODULE_DIR/$source_dir" ] && [ -n "$(ls -A "$SUBMODULE_DIR/$source_dir" 2>/dev/null)" ]; then
+        if [ "$SUBMODULE" = "liblvgl" ]; then
+            # liblvgl 的源码通过 fetch_lvgl.sh 获取到 lvgl/ 目录
+            if [ -d "$SUBMODULE_DIR/lvgl" ] && [ -n "$(ls -A "$SUBMODULE_DIR/lvgl" 2>/dev/null)" ]; then
                 has_source=true
-                break
             fi
-        done
+        else
+            # 其他模块检查标准的源码目录
+            for source_dir in "source" "src"; do
+                if [ -d "$SUBMODULE_DIR/$source_dir" ] && [ -n "$(ls -A "$SUBMODULE_DIR/$source_dir" 2>/dev/null)" ]; then
+                    has_source=true
+                    break
+                fi
+            done
+        fi
         
         if [ "$has_source" = false ]; then
             print_warning "$SUBMODULE: 未找到源代码目录或目录为空"
@@ -459,14 +467,22 @@ check_submodules() {
             continue
         fi
         
-        # 检查头文件目录
+        # 检查头文件目录 (liblvgl 是特殊情况)
         local has_headers=false
-        for header_dir in "include" "inc"; do
-            if [ -d "$SUBMODULE_DIR/$header_dir" ] && [ -n "$(ls -A "$SUBMODULE_DIR/$header_dir" 2>/dev/null)" ]; then
+        if [ "$SUBMODULE" = "liblvgl" ]; then
+            # liblvgl 的头文件在 lvgl/ 目录中
+            if [ -d "$SUBMODULE_DIR/lvgl" ] && [ -n "$(find "$SUBMODULE_DIR/lvgl" -name "*.h" 2>/dev/null)" ]; then
                 has_headers=true
-                break
             fi
-        done
+        else
+            # 其他模块检查标准的头文件目录
+            for header_dir in "include" "inc"; do
+                if [ -d "$SUBMODULE_DIR/$header_dir" ] && [ -n "$(ls -A "$SUBMODULE_DIR/$header_dir" 2>/dev/null)" ]; then
+                    has_headers=true
+                    break
+                fi
+            done
+        fi
         
         if [ "$has_headers" = false ]; then
             print_warning "$SUBMODULE: 未找到头文件目录或目录为空"
