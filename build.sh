@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# mxCamera 项目编译脚本
-# 集成 libgpio、libMedia 和 LVGL 的摄像头实时显示系统
+# mxCamera 集成编译脚本
+# 编译所有 lib 开头的子模块并统一输出到 mxCamera/build/lib
 
-echo "=== mxCamera 项目编译脚本 ==="
+echo "=== mxCamera 集成编译脚本 ==="
 
 # 获取项目根目录绝对路径
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,50 +96,123 @@ check_tools() {
     print_status "Make: $MAKE_VERSION"
 }
 
-# 检查工具链
+# 检查本地工具链
 check_toolchain() {
-    TOOLCHAIN_PREFIX="/home/liewzheng/Workspace/luckfox-pico/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-"
+    TOOLCHAIN_PREFIX="$PROJECT_ROOT/toolchains/bin/arm-rockchip830-linux-uclibcgnueabihf-"
     
     if [ ! -f "${TOOLCHAIN_PREFIX}gcc" ]; then
-        print_error "找不到交叉编译工具链"
+        print_error "找不到本地交叉编译工具链"
         print_error "请检查路径: ${TOOLCHAIN_PREFIX}gcc"
+        print_error "确保 toolchains/ 目录已正确设置"
         exit 1
     fi
     
     TOOLCHAIN_VERSION=$(${TOOLCHAIN_PREFIX}gcc --version | head -n1)
     print_status "工具链: $TOOLCHAIN_VERSION"
+    print_status "工具链路径: $PROJECT_ROOT/toolchains/"
 }
 
-# 检查依赖库
-check_dependencies() {
-    print_status "检查依赖库..."
+# 检查并初始化子模块
+check_and_init_submodules() {
+    print_status "检查并初始化 Git 子模块..."
     
-    # 检查 libgpio
-    LIBGPIO_DIR="$PROJECT_ROOT/../libgpio"
-    if [ ! -f "$LIBGPIO_DIR/build/libgpio.so" ]; then
-        print_error "libgpio 库未找到，请先编译 libgpio"
-        print_status "进入 $LIBGPIO_DIR 目录执行 ./build.sh"
+    # 检查是否在 git 仓库中
+    if [ ! -d ".git" ]; then
+        print_warning "当前目录不是 Git 仓库，跳过子模块检查"
+        return
+    fi
+    
+    # 检查 .gitmodules 文件
+    if [ ! -f ".gitmodules" ]; then
+        print_warning ".gitmodules 文件不存在，跳过子模块初始化"
+        return
+    fi
+    
+    # 初始化子模块
+    print_status "初始化 Git 子模块..."
+    if git submodule init; then
+        print_success "子模块初始化成功"
+    else
+        print_error "子模块初始化失败"
         exit 1
     fi
-    print_status "libgpio: OK"
     
-    # 检查 libMedia
-    LIBMEDIA_DIR="$PROJECT_ROOT/../libMedia"
-    if [ ! -f "$LIBMEDIA_DIR/build/libmedia.so" ]; then
-        print_error "libMedia 库未找到，请先编译 libMedia"
-        print_status "进入 $LIBMEDIA_DIR 目录执行 ./build.sh"
+    # 更新子模块
+    print_status "更新 Git 子模块..."
+    if git submodule update --recursive; then
+        print_success "子模块更新成功"
+    else
+        print_error "子模块更新失败"
         exit 1
     fi
-    print_status "libMedia: OK"
+}
+
+# 准备 LVGL 源码
+prepare_lvgl() {
+    print_status "准备 LVGL 源码..."
     
-    # 检查 LVGL
-    LVGL_DIR="$PROJECT_ROOT/../../lvgl/build"
-    if [ ! -f "$LVGL_DIR/liblvgl.so" ]; then
-        print_error "LVGL 库未找到，请先编译 LVGL"
-        print_status "进入 lvgl_demo 目录执行 ./build.sh"
+    LIBLVGL_DIR="$PROJECT_ROOT/liblvgl"
+    
+    # 检查 liblvgl 目录是否存在
+    if [ ! -d "$LIBLVGL_DIR" ]; then
+        print_error "liblvgl 目录不存在: $LIBLVGL_DIR"
         exit 1
     fi
-    print_status "LVGL: OK"
+    
+    # 检查 fetch_lvgl.sh 脚本是否存在
+    if [ ! -f "$LIBLVGL_DIR/fetch_lvgl.sh" ]; then
+        print_error "fetch_lvgl.sh 脚本不存在: $LIBLVGL_DIR/fetch_lvgl.sh"
+        exit 1
+    fi
+    
+    # 检查 lvgl 目录是否已存在
+    if [ -d "$LIBLVGL_DIR/lvgl" ] && [ -d "$LIBLVGL_DIR/lv_drivers" ]; then
+        print_status "LVGL 源码已存在，跳过下载"
+        return
+    fi
+    
+    # 进入 liblvgl 目录并执行 fetch_lvgl.sh
+    print_status "执行 fetch_lvgl.sh 脚本..."
+    cd "$LIBLVGL_DIR"
+    
+    # 确保脚本有执行权限
+    chmod +x fetch_lvgl.sh
+    
+    # 执行获取脚本
+    if ./fetch_lvgl.sh; then
+        print_success "LVGL 源码获取成功"
+    else
+        print_error "LVGL 源码获取失败"
+        cd "$PROJECT_ROOT"
+        exit 1
+    fi
+    
+    # 返回项目根目录
+    cd "$PROJECT_ROOT"
+    
+    # 验证 LVGL 源码是否正确获取
+    if [ -d "$LIBLVGL_DIR/lvgl" ] && [ -d "$LIBLVGL_DIR/lv_drivers" ]; then
+        print_success "LVGL 源码验证成功"
+    else
+        print_error "LVGL 源码验证失败"
+        exit 1
+    fi
+}
+
+# 检查子模块
+check_submodules() {
+    print_status "检查子模块..."
+    
+    LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging")
+    
+    for SUBMODULE in "${LIB_SUBMODULES[@]}"; do
+        SUBMODULE_DIR="$PROJECT_ROOT/$SUBMODULE"
+        if [ -d "$SUBMODULE_DIR" ] && [ -f "$SUBMODULE_DIR/CMakeLists.txt" ]; then
+            print_status "$SUBMODULE: OK"
+        else
+            print_warning "$SUBMODULE: 目录或 CMakeLists.txt 不存在"
+        fi
+    done
 }
 
 # 清理编译目录
@@ -148,6 +221,8 @@ clean_build() {
         print_status "清理编译目录..."
         rm -rf build
         mkdir -p build
+        mkdir -p build/lib
+        mkdir -p build/bin
     fi
 }
 
@@ -203,25 +278,27 @@ build_project() {
 show_results() {
     cd "$PROJECT_ROOT"
     
+    echo ""
+    echo "=== 编译输出信息 ==="
+    
+    # 显示库文件
+    print_status "已编译的库文件:"
+    if [ -d "build/lib" ]; then
+        ls -la build/lib/
+    else
+        print_warning "build/lib 目录不存在"
+    fi
+    
+    # 显示可执行文件
     if [ -f "build/bin/mxCamera" ]; then
         print_success "可执行文件生成成功!"
         echo ""
-        echo "=== 编译输出信息 ==="
-        
-        # 显示可执行文件信息
         echo "可执行文件:"
         ls -la build/bin/mxCamera
         file build/bin/mxCamera
         
-        # 显示依赖库信息
-        echo ""
-        echo "依赖库:"
-        echo "  libgpio: $(ls -la ../libgpio/build/libgpio.so*)"
-        echo "  libMedia: $(ls -la ../libMedia/build/libmedia.so*)"
-        echo "  LVGL: $(ls -la ../../lvgl/build/liblvgl.so*)"
-        
         # 显示二进制文件信息
-        TOOLCHAIN_PREFIX="/home/liewzheng/Workspace/luckfox-pico/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-"
+        TOOLCHAIN_PREFIX="$PROJECT_ROOT/toolchains/bin/arm-rockchip830-linux-uclibcgnueabihf-"
         if [ -f "${TOOLCHAIN_PREFIX}readelf" ]; then
             echo ""
             echo "目标架构: $(${TOOLCHAIN_PREFIX}readelf -h build/bin/mxCamera | grep Machine)"
@@ -236,24 +313,16 @@ show_results() {
         echo "=== 部署说明 ==="
         echo "1. 将文件拷贝到 Luckfox Pico 设备:"
         echo "   scp build/bin/mxCamera root@<target_ip>:~/"
-        echo "   scp ../libgpio/build/libgpio.so root@<target_ip>:/usr/lib/"
-        echo "   scp ../libMedia/build/libmedia.so root@<target_ip>:/usr/lib/"
-        echo "   scp ../../lvgl/build/liblvgl.so root@<target_ip>:/usr/lib/"
+        echo "   scp build/lib/*.so* root@<target_ip>:/usr/lib/"
         echo ""
         echo "2. 在设备上运行:"
         echo "   export LD_LIBRARY_PATH=/usr/lib:\$LD_LIBRARY_PATH"
         echo "   chmod +x mxCamera"
         echo "   ./mxCamera"
-        echo ""
-        echo "=== 功能说明 ==="
-        echo "- 实时显示摄像头采集的图像"
-        echo "- 右上角显示当前帧率"
-        echo "- 左上角显示运行状态"
-        echo "- KEY0 按键控制摄像头暂停/恢复"
-        echo "- Ctrl+C 退出程序"
         
     else
         print_error "未找到可执行文件 build/bin/mxCamera"
+        print_status "检查编译日志以确定问题"
         exit 1
     fi
 }
@@ -271,14 +340,16 @@ main() {
     
     check_tools
     check_toolchain
-    check_dependencies
+    check_and_init_submodules
+    prepare_lvgl
+    check_submodules
     
     clean_build
     configure_cmake
     build_project
     show_results
     
-    print_success "编译脚本执行完成!"
+    print_success "集成编译脚本执行完成!"
 }
 
 # 执行主函数

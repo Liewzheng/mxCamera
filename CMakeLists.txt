@@ -11,8 +11,14 @@ project(mxCamera
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# 设置交叉编译工具链
-set(TOOLCHAIN_PREFIX "/home/liewzheng/Workspace/luckfox-pico/tools/linux/toolchain/arm-rockchip830-linux-uclibcgnueabihf/bin/arm-rockchip830-linux-uclibcgnueabihf-")
+# 设置交叉编译工具链 - 使用本地 toolchains 目录
+set(TOOLCHAIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/toolchains")
+set(TOOLCHAIN_PREFIX "${TOOLCHAIN_DIR}/bin/arm-rockchip830-linux-uclibcgnueabihf-")
+
+# 检查工具链是否存在
+if(NOT EXISTS "${TOOLCHAIN_PREFIX}gcc")
+    message(FATAL_ERROR "Toolchain not found at ${TOOLCHAIN_PREFIX}gcc")
+endif()
 
 # 设置编译器
 set(CMAKE_C_COMPILER "${TOOLCHAIN_PREFIX}gcc")
@@ -36,35 +42,109 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build" FORCE)
 endif()
 
-# 设置输出目录
+# 设置统一的输出目录 - 所有库输出到 mxCamera/build/lib
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# 强制所有子项目使用统一的输出目录
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/lib)
+
+# ============================================================================
+# 子模块编译配置
+# ============================================================================
+
+# 定义所有需要编译的 lib 子模块
+set(LIB_SUBMODULES
+    libgpio
+    libmedia
+    liblvgl
+    libstaging
+)
+
+# 为所有子模块设置统一的编译配置
+foreach(SUBMODULE ${LIB_SUBMODULES})
+    set(SUBMODULE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/${SUBMODULE}")
+    
+    if(EXISTS "${SUBMODULE_DIR}/CMakeLists.txt")
+        message(STATUS "配置子模块: ${SUBMODULE}")
+        
+        # 创建子模块的构建目录
+        set(SUBMODULE_BUILD_DIR "${CMAKE_BINARY_DIR}/${SUBMODULE}")
+        file(MAKE_DIRECTORY ${SUBMODULE_BUILD_DIR})
+        
+        # 为子模块设置统一的工具链和输出目录
+        set(SUBMODULE_CMAKE_ARGS
+            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+            -DCMAKE_AR=${CMAKE_AR}
+            -DCMAKE_STRIP=${CMAKE_STRIP}
+            -DCMAKE_NM=${CMAKE_NM}
+            -DCMAKE_OBJCOPY=${CMAKE_OBJCOPY}
+            -DCMAKE_OBJDUMP=${CMAKE_OBJDUMP}
+            -DCMAKE_SYSTEM_NAME=Linux
+            -DCMAKE_SYSTEM_PROCESSOR=arm
+            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+            -DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
+            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
+            -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE=${CMAKE_ARCHIVE_OUTPUT_DIRECTORY}
+        )
+        
+        # 特殊处理某些子模块的额外参数
+        if(${SUBMODULE} STREQUAL "libgpio")
+            list(APPEND SUBMODULE_CMAKE_ARGS -DENABLE_CROSS_COMPILE=ON)
+        elseif(${SUBMODULE} STREQUAL "libmedia")
+            list(APPEND SUBMODULE_CMAKE_ARGS -DENABLE_CROSS_COMPILE=ON)
+        endif()
+        
+        # 使用 ExternalProject 编译子模块
+        include(ExternalProject)
+        ExternalProject_Add(${SUBMODULE}_build
+            SOURCE_DIR ${SUBMODULE_DIR}
+            BINARY_DIR ${SUBMODULE_BUILD_DIR}
+            CMAKE_ARGS ${SUBMODULE_CMAKE_ARGS}
+            BUILD_ALWAYS 1
+            INSTALL_COMMAND ""  # 不执行安装，直接使用构建输出
+        )
+        
+        # 记录子模块信息用于后续依赖
+        set(${SUBMODULE}_BUILT_DIR ${SUBMODULE_BUILD_DIR})
+        
+    else()
+        message(WARNING "子模块 ${SUBMODULE} 的 CMakeLists.txt 不存在")
+    endif()
+endforeach()
 
 # ============================================================================
 # 依赖库路径配置
 # ============================================================================
 
-# libgpio 路径
-set(LIBGPIO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libgpio")
+# libgpio 路径 - 使用统一的构建输出
+set(LIBGPIO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libgpio")
 set(LIBGPIO_INCLUDE_DIR "${LIBGPIO_DIR}/include")
-set(LIBGPIO_LIB_DIR "${LIBGPIO_DIR}/build")
+set(LIBGPIO_LIB_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 
-# libMedia 路径
-set(LIBMEDIA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../libMedia")
+# libMedia 路径 - 使用统一的构建输出
+set(LIBMEDIA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmedia")
 set(LIBMEDIA_INCLUDE_DIR "${LIBMEDIA_DIR}/include")
-set(LIBMEDIA_LIB_DIR "${LIBMEDIA_DIR}/build")
+set(LIBMEDIA_LIB_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 
-# libstaging 路径 (fbtft_benchmark 库)
-set(LIBSTAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../fbtft_benchmark")
+# libstaging 路径 - 使用统一的构建输出
+set(LIBSTAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libstaging")
 set(LIBSTAGING_INCLUDE_DIR "${LIBSTAGING_DIR}/include")
-set(LIBSTAGING_LIB_DIR "${LIBSTAGING_DIR}/build/lib")
+set(LIBSTAGING_LIB_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 
-# LVGL 路径
-set(LVGL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../lvgl")
+# LVGL 路径 - 使用统一的构建输出
+set(LVGL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/liblvgl")
 set(LVGL_DIR "${LVGL_ROOT}/lvgl")
 set(LVGL_DRIVERS_DIR "${LVGL_ROOT}/lv_drivers")
-set(LVGL_LIB_DIR "${LVGL_ROOT}/build")
+set(LVGL_LIB_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 
 # 项目头文件目录
 set(PROJECT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -78,48 +158,55 @@ set(PROJECT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/source")
 if(NOT EXISTS "${LIBGPIO_INCLUDE_DIR}/gpio.h")
     message(FATAL_ERROR "libgpio header not found at ${LIBGPIO_INCLUDE_DIR}")
 endif()
-
-find_library(LIBGPIO_LIBRARY 
-    NAMES gpio
-    PATHS ${LIBGPIO_LIB_DIR}
-    NO_DEFAULT_PATH
-)
-
-if(NOT LIBGPIO_LIBRARY)
-    message(FATAL_ERROR "libgpio library not found in ${LIBGPIO_LIB_DIR}")
-endif()
+message(STATUS "libgpio 头文件检查: OK")
 
 # 检查 libMedia
 if(NOT EXISTS "${LIBMEDIA_INCLUDE_DIR}/media.h")
     message(FATAL_ERROR "libMedia header not found at ${LIBMEDIA_INCLUDE_DIR}")
 endif()
-
-find_library(LIBMEDIA_LIBRARY 
-    NAMES media
-    PATHS ${LIBMEDIA_LIB_DIR}
-    NO_DEFAULT_PATH
-)
-
-if(NOT LIBMEDIA_LIBRARY)
-    message(FATAL_ERROR "libMedia library not found in ${LIBMEDIA_LIB_DIR}")
-endif()
+message(STATUS "libMedia 头文件检查: OK")
 
 # 检查 libstaging
 if(NOT EXISTS "${LIBSTAGING_INCLUDE_DIR}/fbtft_lcd.h")
     message(FATAL_ERROR "libstaging header not found at ${LIBSTAGING_INCLUDE_DIR}")
 endif()
-
-find_library(LIBSTAGING_LIBRARY 
-    NAMES staging
-    PATHS ${LIBSTAGING_LIB_DIR}
-    NO_DEFAULT_PATH
-)
-
-if(NOT LIBSTAGING_LIBRARY)
-    message(FATAL_ERROR "libstaging library not found in ${LIBSTAGING_LIB_DIR}")
-endif()
+message(STATUS "libstaging 头文件检查: OK")
 
 # 检查 LVGL
+# 检查 LVGL - 如果不存在则自动获取
+if(NOT EXISTS "${LVGL_DIR}")
+    message(STATUS "LVGL 源码不存在，尝试自动获取...")
+    
+    # 检查 fetch_lvgl.sh 脚本是否存在
+    set(FETCH_LVGL_SCRIPT "${LVGL_ROOT}/fetch_lvgl.sh")
+    if(EXISTS "${FETCH_LVGL_SCRIPT}")
+        message(STATUS "执行 fetch_lvgl.sh 获取 LVGL 源码...")
+        
+        # 执行 fetch_lvgl.sh 脚本
+        execute_process(
+            COMMAND chmod +x ${FETCH_LVGL_SCRIPT}
+            WORKING_DIRECTORY ${LVGL_ROOT}
+            RESULT_VARIABLE CHMOD_RESULT
+        )
+        
+        execute_process(
+            COMMAND ${FETCH_LVGL_SCRIPT}
+            WORKING_DIRECTORY ${LVGL_ROOT}
+            RESULT_VARIABLE FETCH_RESULT
+            OUTPUT_VARIABLE FETCH_OUTPUT
+            ERROR_VARIABLE FETCH_ERROR
+        )
+        
+        if(FETCH_RESULT EQUAL 0)
+            message(STATUS "LVGL 源码获取成功")
+        else()
+            message(FATAL_ERROR "LVGL 源码获取失败: ${FETCH_ERROR}")
+        endif()
+    else()
+        message(FATAL_ERROR "fetch_lvgl.sh 脚本不存在: ${FETCH_LVGL_SCRIPT}")
+    endif()
+endif()
+
 if(NOT EXISTS "${LVGL_DIR}")
     message(FATAL_ERROR "LVGL library not found at ${LVGL_DIR}")
 endif()
@@ -128,15 +215,7 @@ if(NOT EXISTS "${LVGL_DRIVERS_DIR}")
     message(FATAL_ERROR "LVGL drivers not found at ${LVGL_DRIVERS_DIR}")
 endif()
 
-find_library(LVGL_LIBRARY 
-    NAMES lvgl
-    PATHS ${LVGL_LIB_DIR}
-    NO_DEFAULT_PATH
-)
-
-if(NOT LVGL_LIBRARY)
-    message(FATAL_ERROR "LVGL library not found in ${LVGL_LIB_DIR}")
-endif()
+message(STATUS "LVGL 源码检查: OK")
 
 # ============================================================================
 # 头文件搜索路径
@@ -172,34 +251,34 @@ set(COMMON_FLAGS
 add_compile_options(${COMMON_FLAGS})
 
 # ============================================================================
-# 创建导入的动态库目标
+# 创建导入的动态库目标 - 指向将要编译生成的库文件
 # ============================================================================
 
 # libgpio
 add_library(gpio SHARED IMPORTED)
 set_target_properties(gpio PROPERTIES
-    IMPORTED_LOCATION ${LIBGPIO_LIBRARY}
+    IMPORTED_LOCATION ${LIBGPIO_LIB_DIR}/libgpio.so
     INTERFACE_INCLUDE_DIRECTORIES ${LIBGPIO_INCLUDE_DIR}
 )
 
 # libMedia
 add_library(media SHARED IMPORTED)
 set_target_properties(media PROPERTIES
-    IMPORTED_LOCATION ${LIBMEDIA_LIBRARY}
+    IMPORTED_LOCATION ${LIBMEDIA_LIB_DIR}/libmedia.so
     INTERFACE_INCLUDE_DIRECTORIES ${LIBMEDIA_INCLUDE_DIR}
 )
 
 # libstaging
 add_library(staging SHARED IMPORTED)
 set_target_properties(staging PROPERTIES
-    IMPORTED_LOCATION ${LIBSTAGING_LIBRARY}
+    IMPORTED_LOCATION ${LIBSTAGING_LIB_DIR}/libstaging.so
     INTERFACE_INCLUDE_DIRECTORIES ${LIBSTAGING_INCLUDE_DIR}
 )
 
 # LVGL
 add_library(lvgl SHARED IMPORTED)
 set_target_properties(lvgl PROPERTIES
-    IMPORTED_LOCATION ${LVGL_LIBRARY}
+    IMPORTED_LOCATION ${LVGL_LIB_DIR}/liblvgl.so
     INTERFACE_INCLUDE_DIRECTORIES "${LVGL_DIR};${LVGL_DRIVERS_DIR};${LVGL_ROOT}"
 )
 
@@ -214,6 +293,14 @@ file(GLOB PROJECT_SOURCES
 
 # 创建可执行文件
 add_executable(${PROJECT_NAME} ${PROJECT_SOURCES})
+
+# 添加子模块依赖 - 确保子模块先编译完成
+add_dependencies(${PROJECT_NAME} 
+    libgpio_build
+    libmedia_build
+    liblvgl_build
+    libstaging_build
+)
 
 # 设置包含目录
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -314,8 +401,15 @@ message(STATUS "=== mxCamera 项目配置 ===")
 message(STATUS "项目名称: ${PROJECT_NAME}")
 message(STATUS "版本: ${PROJECT_VERSION}")
 message(STATUS "编译类型: ${CMAKE_BUILD_TYPE}")
-message(STATUS "libgpio: ${LIBGPIO_LIBRARY}")
-message(STATUS "libMedia: ${LIBMEDIA_LIBRARY}")
-message(STATUS "libstaging: ${LIBSTAGING_LIBRARY}")
-message(STATUS "LVGL: ${LVGL_LIBRARY}")
-message(STATUS "输出目录: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+message(STATUS "工具链目录: ${TOOLCHAIN_DIR}")
+message(STATUS "编译器: ${CMAKE_C_COMPILER}")
+message(STATUS "统一输出目录: ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+message(STATUS "子模块编译状态:")
+foreach(SUBMODULE ${LIB_SUBMODULES})
+    message(STATUS "  - ${SUBMODULE}: 已配置")
+endforeach()
+message(STATUS "libgpio 库路径: ${LIBGPIO_LIB_DIR}/libgpio.so")
+message(STATUS "libMedia 库路径: ${LIBMEDIA_LIB_DIR}/libmedia.so")
+message(STATUS "libstaging 库路径: ${LIBSTAGING_LIB_DIR}/libstaging.so")
+message(STATUS "LVGL 库路径: ${LVGL_LIB_DIR}/liblvgl.so")
+message(STATUS "可执行文件输出: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
