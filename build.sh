@@ -443,6 +443,136 @@ show_results() {
     fi
 }
 
+# 创建部署包
+create_deployment_package() {
+    print_status "创建部署包..."
+    
+    # 检查zip命令是否存在
+    if ! command -v zip &> /dev/null; then
+        print_error "zip 命令未找到，请安装 zip 工具"
+        print_error "Ubuntu/Debian: sudo apt install zip"
+        print_error "CentOS/RHEL: sudo yum install zip"
+        exit 1
+    fi
+    
+    # 创建临时目录用于打包
+    PACKAGE_DIR="$PROJECT_ROOT/build/package"
+    rm -rf "$PACKAGE_DIR"
+    mkdir -p "$PACKAGE_DIR"
+    
+    # 复制二进制文件
+    print_status "复制二进制文件..."
+    if [ -d "build/bin" ]; then
+        cp -r build/bin "$PACKAGE_DIR/"
+    else
+        print_error "build/bin 目录不存在"
+        exit 1
+    fi
+    
+    # 复制库文件（去掉符号链接，只保留实际文件）
+    print_status "复制库文件（去掉符号链接）..."
+    if [ -d "build/lib" ]; then
+        mkdir -p "$PACKAGE_DIR/lib"
+        # 只复制实际的.so文件，跳过符号链接
+        find build/lib -name "*.so*" -type f -exec cp {} "$PACKAGE_DIR/lib/" \;
+    else
+        print_error "build/lib 目录不存在"
+        exit 1
+    fi
+    
+    # 复制部署脚本
+    print_status "复制部署脚本..."
+    if [ -f "deploy.ps1" ]; then
+        cp deploy.ps1 "$PACKAGE_DIR/"
+    else
+        print_warning "deploy.ps1 不存在，跳过"
+    fi
+    
+    # 复制启动脚本
+    if [ -f "mxcamera" ]; then
+        cp mxcamera "$PACKAGE_DIR/"
+    else
+        print_warning "mxcamera 启动脚本不存在，跳过"
+    fi
+    
+    # 创建部署说明文件
+    cat > "$PACKAGE_DIR/README.txt" << EOF
+mxCamera 部署包
+==============
+
+此包包含：
+- bin/mxCamera: 主程序可执行文件
+- lib/*.so.*: 动态库文件
+- deploy.ps1: Windows PowerShell 部署脚本
+- mxcamera: Linux 启动服务脚本
+- README.txt: 本说明文件
+
+部署方法：
+=========
+
+方法一：使用 PowerShell 自动部署（推荐）
+1. 确保设备已通过 ADB 连接
+2. 在 Windows 上以管理员身份运行 PowerShell
+3. 执行: .\deploy.ps1
+
+方法二：手动部署
+1. 将 bin/mxCamera 复制到设备的 /root/Workspace/
+2. 将 lib/*.so.* 复制到设备的 /usr/lib/
+3. 将 mxcamera 复制到设备的 /etc/init.d/S99mxcamera
+4. 在设备上执行: chmod +x /root/Workspace/mxCamera
+5. 在设备上执行: chmod +x /etc/init.d/S99mxcamera
+
+注意事项：
+=========
+- 目标架构: ARM (Luckfox Pico)
+- 需要 root 权限进行部署
+- 建议先停止冲突的服务
+
+生成时间: $(date '+%Y-%m-%d %H:%M:%S')
+构建类型: $BUILD_TYPE
+EOF
+    
+    # 生成部署包文件名
+    local timestamp=$(date '+%Y%m%d_%H%M%S')
+    local package_name="mxCamera_${BUILD_TYPE}_${timestamp}.zip"
+    local package_path="$PROJECT_ROOT/$package_name"
+    
+    # 创建 zip 包
+    print_status "创建 ZIP 包: $package_name"
+    cd "$PACKAGE_DIR"
+    if zip -r "$package_path" . > /dev/null 2>&1; then
+        print_success "部署包创建成功: $package_name"
+    else
+        print_error "部署包创建失败"
+        cd "$PROJECT_ROOT"
+        exit 1
+    fi
+    
+    cd "$PROJECT_ROOT"
+    
+    # 显示包内容
+    print_status "部署包内容:"
+    unzip -l "$package_path" | grep -v "Archive:" | grep -v "Length" | grep -v "^$" | head -20
+    
+    # 显示包信息
+    local package_size=$(ls -lh "$package_path" | awk '{print $5}')
+    echo ""
+    print_success "=== 部署包信息 ==="
+    echo "文件名: $package_name"
+    echo "大小: $package_size"
+    echo "路径: $package_path"
+    echo ""
+    print_status "=== Windows 部署说明 ==="
+    echo "1. 将 $package_name 下载到 Windows 计算机"
+    echo "2. 解压缩到任意目录"
+    echo "3. 确保 Luckfox Pico 设备已通过 ADB 连接"
+    echo "4. 以管理员身份运行 PowerShell"
+    echo "5. 进入解压目录，执行: .\\deploy.ps1"
+    
+    # 清理临时目录
+    rm -rf "$PACKAGE_DIR"
+}
+
 # 主执行流程
 main() {
     # 确保在项目根目录执行
@@ -464,7 +594,8 @@ main() {
     build_submodules    # 先编译所有子模块
     configure_cmake     # 再配置主项目
     build_project       # 最后编译主项目
-    show_results
+    show_results        # 显示编译结果
+    create_deployment_package  # 创建部署包
     
     print_success "集成编译脚本执行完成!"
 }
