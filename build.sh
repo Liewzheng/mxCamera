@@ -41,6 +41,83 @@ echo "=== mxCamera 集成编译脚本 ==="
 # 获取项目根目录绝对路径
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 设置颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# 打印彩色消息
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# 检查是否为首次运行
+check_first_run() {
+    local is_first_run=false
+    
+    # 检查是否缺少关键目录或文件
+    if [ ! -d "build" ] || [ ! -d ".git" ]; then
+        is_first_run=true
+    fi
+    
+    # 检查子模块是否为空
+    if [ -d ".git" ] && [ -f ".gitmodules" ]; then
+        local submodule_paths=($(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'))
+        for submodule_path in "${submodule_paths[@]}"; do
+            if [ ! -d "$submodule_path" ] || [ -z "$(ls -A "$submodule_path" 2>/dev/null)" ]; then
+                is_first_run=true
+                break
+            fi
+        done
+    fi
+    
+    if [ "$is_first_run" = true ]; then
+        echo ""
+        print_status "=== 检测到首次运行或仓库不完整 ==="
+        echo ""
+        echo "👋 欢迎使用 mxCamera 项目！"
+        echo ""
+        echo "本脚本将自动为您完成以下操作："
+        echo "  📦 检查并拉取 Git 子模块"
+        echo "  📥 下载 LVGL 源码依赖"
+        echo "  🔧 配置交叉编译环境"
+        echo "  🔨 编译所有库和主程序"
+        echo "  📄 生成部署包"
+        echo ""
+        echo "首次编译可能需要 5-10 分钟，请耐心等待..."
+        echo ""
+        
+        # 询问用户是否继续
+        if [ -t 0 ]; then  # 检查是否在交互式终端中
+            read -p "是否继续？[Y/n] " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Nn]$ ]]; then
+                echo "用户取消操作"
+                exit 0
+            fi
+        fi
+        
+        echo ""
+    fi
+}
+
+# 检查首次运行
+check_first_run
+
 # 脚本参数处理
 BUILD_TYPE="Release"
 CLEAN=false
@@ -84,30 +161,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 设置颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# 打印彩色消息
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
 # 检查必要工具
 check_tools() {
     print_status "检查编译工具..."
@@ -145,9 +198,9 @@ check_toolchain() {
     print_status "工具链路径: $PROJECT_ROOT/toolchains/"
 }
 
-# 检查并初始化子模块
+# 检查并自动初始化子模块
 check_and_init_submodules() {
-    print_status "检查并初始化 Git 子模块..."
+    print_status "检查 Git 子模块状态..."
     
     # 检查是否在 git 仓库中
     if [ ! -d ".git" ]; then
@@ -161,21 +214,105 @@ check_and_init_submodules() {
         return
     fi
     
-    # 初始化子模块
-    print_status "初始化 Git 子模块..."
-    if git submodule init; then
-        print_success "子模块初始化成功"
-    else
-        print_error "子模块初始化失败"
-        exit 1
+    # 检查子模块是否已经初始化和更新
+    local need_init=false
+    local need_update=false
+    
+    # 获取所有子模块路径
+    local submodule_paths=($(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'))
+    
+    if [ ${#submodule_paths[@]} -eq 0 ]; then
+        print_warning "未找到任何子模块定义"
+        return
     fi
     
-    # 更新子模块
-    print_status "更新 Git 子模块..."
-    if git submodule update --recursive; then
-        print_success "子模块更新成功"
+    print_status "发现 ${#submodule_paths[@]} 个子模块，检查状态..."
+    
+    # 检查每个子模块的状态
+    for submodule_path in "${submodule_paths[@]}"; do
+        if [ ! -d "$submodule_path" ]; then
+            print_warning "子模块目录不存在: $submodule_path"
+            need_init=true
+            continue
+        fi
+        
+        # 检查子模块目录是否为空
+        if [ -z "$(ls -A "$submodule_path" 2>/dev/null)" ]; then
+            print_warning "子模块目录为空: $submodule_path"
+            need_update=true
+            continue
+        fi
+        
+        # 检查子模块是否为有效的 git 仓库
+        if [ ! -d "$submodule_path/.git" ] && [ ! -f "$submodule_path/.git" ]; then
+            print_warning "子模块未正确初始化: $submodule_path"
+            need_init=true
+            need_update=true
+            continue
+        fi
+        
+        print_status "子模块状态正常: $submodule_path"
+    done
+    
+    # 如果需要初始化子模块
+    if [ "$need_init" = true ]; then
+        print_status "检测到未初始化的子模块，正在自动初始化..."
+        if git submodule init; then
+            print_success "子模块初始化成功"
+            need_update=true  # 初始化后需要更新
+        else
+            print_error "子模块初始化失败"
+            print_error "请手动执行: git submodule init"
+            exit 1
+        fi
+    fi
+    
+    # 如果需要更新子模块
+    if [ "$need_update" = true ]; then
+        print_status "正在更新子模块内容..."
+        if git submodule update --recursive --init; then
+            print_success "子模块更新成功"
+        else
+            print_error "子模块更新失败"
+            print_error "请检查网络连接或手动执行: git submodule update --recursive --init"
+            
+            # 提供诊断信息
+            echo ""
+            print_status "=== 子模块诊断信息 ==="
+            git submodule status
+            echo ""
+            print_status "可能的解决方案："
+            echo "1. 检查网络连接是否正常"
+            echo "2. 手动执行: git submodule update --recursive --init"
+            echo "3. 如果是私有仓库，请确保有访问权限"
+            echo "4. 尝试使用 HTTPS 替代 SSH: git config --global url.\"https://github.com/\".insteadOf git@github.com:"
+            exit 1
+        fi
     else
-        print_error "子模块更新失败"
+        print_success "所有子模块状态正常，无需更新"
+    fi
+    
+    # 最终验证子模块状态
+    print_status "验证子模块最终状态..."
+    local all_ok=true
+    for submodule_path in "${submodule_paths[@]}"; do
+        if [ ! -d "$submodule_path" ] || [ -z "$(ls -A "$submodule_path" 2>/dev/null)" ]; then
+            print_error "子模块验证失败: $submodule_path"
+            all_ok=false
+        fi
+    done
+    
+    if [ "$all_ok" = true ]; then
+        print_success "所有子模块验证通过"
+        
+        # 显示子模块状态摘要
+        echo ""
+        print_status "=== 子模块状态摘要 ==="
+        git submodule status | while read line; do
+            echo "  $line"
+        done
+    else
+        print_error "部分子模块验证失败，请检查上述错误信息"
         exit 1
     fi
 }
@@ -189,33 +326,69 @@ prepare_lvgl() {
     # 检查 liblvgl 目录是否存在
     if [ ! -d "$LIBLVGL_DIR" ]; then
         print_error "liblvgl 目录不存在: $LIBLVGL_DIR"
+        print_error "请确保子模块已正确拉取"
         exit 1
     fi
     
     # 检查 fetch_lvgl.sh 脚本是否存在
     if [ ! -f "$LIBLVGL_DIR/fetch_lvgl.sh" ]; then
         print_error "fetch_lvgl.sh 脚本不存在: $LIBLVGL_DIR/fetch_lvgl.sh"
+        print_error "请检查 liblvgl 子模块是否完整"
         exit 1
     fi
     
-    # 检查 lvgl 目录是否已存在
+    # 检查 lvgl 目录是否已存在且不为空
     if [ -d "$LIBLVGL_DIR/lvgl" ] && [ -d "$LIBLVGL_DIR/lv_drivers" ]; then
-        print_status "LVGL 源码已存在，跳过下载"
-        return
+        # 进一步检查目录是否有内容
+        local lvgl_files=$(find "$LIBLVGL_DIR/lvgl" -name "*.c" -o -name "*.h" | wc -l)
+        local driver_files=$(find "$LIBLVGL_DIR/lv_drivers" -name "*.c" -o -name "*.h" | wc -l)
+        
+        if [ "$lvgl_files" -gt 0 ] && [ "$driver_files" -gt 0 ]; then
+            print_success "LVGL 源码已存在且完整 (LVGL: $lvgl_files 文件, 驱动: $driver_files 文件)"
+            return
+        else
+            print_warning "LVGL 源码目录存在但内容不完整，重新获取..."
+            rm -rf "$LIBLVGL_DIR/lvgl" "$LIBLVGL_DIR/lv_drivers"
+        fi
     fi
     
     # 进入 liblvgl 目录并执行 fetch_lvgl.sh
-    print_status "执行 fetch_lvgl.sh 脚本..."
+    print_status "执行 fetch_lvgl.sh 脚本获取 LVGL 源码..."
     cd "$LIBLVGL_DIR"
     
     # 确保脚本有执行权限
     chmod +x fetch_lvgl.sh
     
+    # 检查网络连接（通过尝试解析 GitHub）
+    if ! nslookup github.com >/dev/null 2>&1; then
+        print_warning "无法解析 github.com，网络可能有问题"
+        print_status "如果下载失败，请检查网络连接或代理设置"
+    fi
+    
     # 执行获取脚本
-    if ./fetch_lvgl.sh; then
+    print_status "正在下载 LVGL 源码，这可能需要几分钟时间..."
+    if timeout 300 ./fetch_lvgl.sh; then  # 5分钟超时
         print_success "LVGL 源码获取成功"
     else
-        print_error "LVGL 源码获取失败"
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            print_error "LVGL 源码下载超时（超过5分钟）"
+        else
+            print_error "LVGL 源码获取失败（退出码: $exit_code）"
+        fi
+        
+        print_status "=== LVGL 源码获取失败的解决方案 ==="
+        echo "1. 检查网络连接是否正常"
+        echo "2. 如果在中国大陆，尝试配置代理："
+        echo "   export https_proxy=http://proxy:port"
+        echo "   export http_proxy=http://proxy:port"
+        echo "3. 或者手动下载 LVGL 源码："
+        echo "   cd $LIBLVGL_DIR"
+        echo "   git clone https://github.com/lvgl/lvgl.git"
+        echo "   git clone https://github.com/lvgl/lv_drivers.git"
+        echo "4. 使用国内镜像（如果可用）："
+        echo "   git config --global url.\"https://gitee.com/\".insteadOf \"https://github.com/\""
+        
         cd "$PROJECT_ROOT"
         exit 1
     fi
@@ -225,27 +398,126 @@ prepare_lvgl() {
     
     # 验证 LVGL 源码是否正确获取
     if [ -d "$LIBLVGL_DIR/lvgl" ] && [ -d "$LIBLVGL_DIR/lv_drivers" ]; then
-        print_success "LVGL 源码验证成功"
+        # 检查关键文件
+        local lvgl_files=$(find "$LIBLVGL_DIR/lvgl" -name "*.c" -o -name "*.h" | wc -l)
+        local driver_files=$(find "$LIBLVGL_DIR/lv_drivers" -name "*.c" -o -name "*.h" | wc -l)
+        
+        if [ "$lvgl_files" -gt 100 ] && [ "$driver_files" -gt 10 ]; then
+            print_success "LVGL 源码验证成功 (LVGL: $lvgl_files 文件, 驱动: $driver_files 文件)"
+        else
+            print_error "LVGL 源码不完整 (LVGL: $lvgl_files 文件, 驱动: $driver_files 文件)"
+            print_error "期望 LVGL 文件数 > 100，驱动文件数 > 10"
+            exit 1
+        fi
     else
-        print_error "LVGL 源码验证失败"
+        print_error "LVGL 源码验证失败，目录结构不正确"
         exit 1
     fi
 }
 
-# 检查子模块
+# 检查子模块完整性
 check_submodules() {
-    print_status "检查子模块..."
+    print_status "检查子模块完整性..."
     
     LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging")
+    local all_ok=true
+    local missing_modules=()
+    local incomplete_modules=()
     
     for SUBMODULE in "${LIB_SUBMODULES[@]}"; do
         SUBMODULE_DIR="$PROJECT_ROOT/$SUBMODULE"
-        if [ -d "$SUBMODULE_DIR" ] && [ -f "$SUBMODULE_DIR/CMakeLists.txt" ]; then
-            print_status "$SUBMODULE: OK"
-        else
-            print_warning "$SUBMODULE: 目录或 CMakeLists.txt 不存在"
+        
+        # 检查目录是否存在
+        if [ ! -d "$SUBMODULE_DIR" ]; then
+            print_error "$SUBMODULE: 目录不存在"
+            missing_modules+=("$SUBMODULE")
+            all_ok=false
+            continue
         fi
+        
+        # 检查 CMakeLists.txt 是否存在
+        if [ ! -f "$SUBMODULE_DIR/CMakeLists.txt" ]; then
+            print_error "$SUBMODULE: CMakeLists.txt 不存在"
+            incomplete_modules+=("$SUBMODULE")
+            all_ok=false
+            continue
+        fi
+        
+        # 检查源代码目录
+        local has_source=false
+        for source_dir in "source" "src"; do
+            if [ -d "$SUBMODULE_DIR/$source_dir" ] && [ -n "$(ls -A "$SUBMODULE_DIR/$source_dir" 2>/dev/null)" ]; then
+                has_source=true
+                break
+            fi
+        done
+        
+        if [ "$has_source" = false ]; then
+            print_warning "$SUBMODULE: 未找到源代码目录或目录为空"
+            incomplete_modules+=("$SUBMODULE")
+            all_ok=false
+            continue
+        fi
+        
+        # 检查头文件目录
+        local has_headers=false
+        for header_dir in "include" "inc"; do
+            if [ -d "$SUBMODULE_DIR/$header_dir" ] && [ -n "$(ls -A "$SUBMODULE_DIR/$header_dir" 2>/dev/null)" ]; then
+                has_headers=true
+                break
+            fi
+        done
+        
+        if [ "$has_headers" = false ]; then
+            print_warning "$SUBMODULE: 未找到头文件目录或目录为空"
+        fi
+        
+        # 统计文件数量
+        local c_files=$(find "$SUBMODULE_DIR" -name "*.c" 2>/dev/null | wc -l)
+        local h_files=$(find "$SUBMODULE_DIR" -name "*.h" 2>/dev/null | wc -l)
+        
+        print_success "$SUBMODULE: OK (C文件: $c_files, 头文件: $h_files)"
     done
+    
+    echo ""
+    
+    # 报告检查结果
+    if [ "$all_ok" = true ]; then
+        print_success "=== 所有子模块检查通过 ==="
+    else
+        print_error "=== 发现子模块问题 ==="
+        
+        if [ ${#missing_modules[@]} -gt 0 ]; then
+            echo ""
+            print_error "缺失的子模块:"
+            for module in "${missing_modules[@]}"; do
+                echo "  - $module"
+            done
+        fi
+        
+        if [ ${#incomplete_modules[@]} -gt 0 ]; then
+            echo ""
+            print_warning "不完整的子模块:"
+            for module in "${incomplete_modules[@]}"; do
+                echo "  - $module"
+            done
+        fi
+        
+        echo ""
+        print_status "=== 建议的解决方案 ==="
+        echo "1. 重新拉取子模块:"
+        echo "   git submodule update --init --recursive --force"
+        echo ""
+        echo "2. 如果问题持续存在，尝试清理并重新克隆子模块:"
+        echo "   git submodule deinit --all"
+        echo "   git submodule update --init --recursive"
+        echo ""
+        echo "3. 检查 .gitmodules 文件中的子模块 URL 是否正确"
+        echo ""
+        echo "4. 如果是网络问题，尝试配置代理或使用镜像源"
+        
+        exit 1
+    fi
 }
 
 # 清理编译目录
