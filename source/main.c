@@ -79,7 +79,6 @@ struct frame_header {
 // 全局摄像头配置变量 (可通过命令行修改)
 static int camera_width = DEFAULT_CAMERA_WIDTH;
 static int camera_height = DEFAULT_CAMERA_HEIGHT;
-static char camera_device[256] = DEFAULT_CAMERA_DEVICE;
 
 // 显示配置 (横屏模式)
 #define DISPLAY_WIDTH 320
@@ -116,7 +115,6 @@ typedef struct {
     int gain_step;          // 增益调整步长
     int camera_width;       // 摄像头宽度
     int camera_height;      // 摄像头高度
-    char camera_device[256]; // 摄像头设备路径
 } mxcamera_config_t;
 
 // ============================================================================
@@ -294,8 +292,6 @@ static void signal_handler(int sig) {
     current_config.gain = current_gain;
     current_config.camera_width = camera_width;
     current_config.camera_height = camera_height;
-    strncpy(current_config.camera_device, camera_device, sizeof(current_config.camera_device) - 1);
-    current_config.camera_device[sizeof(current_config.camera_device) - 1] = '\0';
     current_config.exposure_step = exposure_step;
     current_config.gain_step = gain_step;
     
@@ -339,13 +335,11 @@ static void print_usage(const char* program_name) {
     printf("\nOptions:\n");
     printf("  --width WIDTH      Set camera width (default: %d)\n", DEFAULT_CAMERA_WIDTH);
     printf("  --height HEIGHT    Set camera height (default: %d)\n", DEFAULT_CAMERA_HEIGHT);
-    printf("  --device DEVICE    Set camera device path (default: %s)\n", DEFAULT_CAMERA_DEVICE);
     printf("  --tcp-port PORT    Set TCP server port (default: %d)\n", DEFAULT_PORT);
     printf("  --tcp-ip IP        Set TCP server IP (default: %s)\n", DEFAULT_SERVER_IP);
     printf("  --help, -h         Show this help message\n");
     printf("\nExamples:\n");
     printf("  %s --width 1920 --height 1080\n", program_name);
-    printf("  %s --width 1600 --height 1200 --device /dev/video1\n", program_name);
     printf("  %s --tcp-port 9999 --tcp-ip 192.168.1.100\n", program_name);
     printf("\nSupported resolutions (depends on camera):\n");
     printf("  1920x1080 (Full HD)\n");
@@ -388,13 +382,6 @@ static int parse_arguments(int argc, char* argv[]) {
                 printf("Error: Invalid height %d (must be 1-4096)\n", camera_height);
                 return -1;
             }
-        } else if (strcmp(argv[i], "--device") == 0) {
-            if (i + 1 >= argc) {
-                printf("Error: --device requires a value\n");
-                return -1;
-            }
-            strncpy(camera_device, argv[++i], sizeof(camera_device) - 1);
-            camera_device[sizeof(camera_device) - 1] = '\0';
         } else if (strcmp(argv[i], "--tcp-port") == 0) {
             if (i + 1 >= argc) {
                 printf("Error: --tcp-port requires a value\n");
@@ -426,7 +413,6 @@ static int parse_arguments(int argc, char* argv[]) {
     
     printf("Camera configuration:\n");
     printf("  Resolution: %dx%d\n", camera_width, camera_height);
-    printf("  Device: %s\n", camera_device);
     printf("  Format: SBGGR10 (RAW10)\n");
     
     return 0;
@@ -1384,7 +1370,7 @@ static void init_lvgl_ui(void) {
     
     // 创建设置菜单面板 (初始隐藏) - 重新设计为导航式菜单
     menu_panel = lv_obj_create(scr);
-    lv_obj_set_size(menu_panel, 200, 200);
+    lv_obj_set_size(menu_panel, 200, 160);
     lv_obj_center(menu_panel);
     lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
@@ -1544,7 +1530,7 @@ int main(int argc, char* argv[]) {
     
     // 配置摄像头会话 (使用命令行参数或默认值)
     media_session_config_t config = {
-        .device_path = camera_device,
+        .device_path = DEFAULT_CAMERA_DEVICE,
         .format = {
             .width = camera_width,
             .height = camera_height,
@@ -1595,7 +1581,7 @@ int main(int argc, char* argv[]) {
     
     printf("System initialized successfully\n");
     printf("Display: 320x240 (forced landscape mode)\n");
-    printf("Camera: %dx%d (RAW10) on %s\n", camera_width, camera_height, camera_device);
+    printf("Camera: %dx%d (RAW10) on %s\n", camera_width, camera_height, DEFAULT_CAMERA_DEVICE);
     printf("Scaling: Width-aligned to 320px, maintaining aspect ratio\n");
     printf("Performance optimizations enabled:\n");
     printf("  - Display update rate limited to 30 FPS\n");
@@ -1831,6 +1817,8 @@ static void update_menu_selection(void) {
     if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn) return;
     
     // 重置所有选项的背景
+   
+      
     lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_30, 0);
     lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
@@ -2279,8 +2267,8 @@ static char* generate_photo_filename(void) {
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%H-%M-%S", tm_info);
     
-    // 构建包含分辨率的文件名，标明是解包后的16位像素数据
-    snprintf(filename, sizeof(filename), "/root/images/%04d-%02d-%02d/%s_%dx%d_unpacked.raw",
+    // 构建包含分辨率的文件名，使用 .bin 扩展名表示16位解包数据
+    snprintf(filename, sizeof(filename), "/root/images/%04d-%02d-%02d/%s_%dx%d_16bit.bin",
              tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
              timestamp, camera_width, camera_height);
     
@@ -2315,8 +2303,7 @@ static int capture_raw_photo(void) {
         printf("Error: Failed to capture frame for photo\n");
         return -1;
     }
-    
-    // 验证帧数据尺寸是否与设置的分辨率匹配
+     // 验证帧数据尺寸是否与设置的分辨率匹配
     size_t expected_size = camera_width * camera_height * 2; // RAW10 约2字节/像素
     if (frame.size != expected_size) {
         printf("Warning: Frame size mismatch - expected %zu bytes (%dx%d*2), got %zu bytes\n",
@@ -2326,30 +2313,31 @@ static int capture_raw_photo(void) {
         printf("Frame size verified: %zu bytes (%dx%d RAW10)\n", 
                frame.size, camera_width, camera_height);
     }
-    
-    // 分配内存用于解包后的像素数据
+
+    // 分配缓冲区用于解包的像素数据
     size_t pixel_count = camera_width * camera_height;
-    uint16_t* unpacked_pixels = (uint16_t*)malloc(pixel_count * sizeof(uint16_t));
+    uint16_t* unpacked_pixels = malloc(pixel_count * sizeof(uint16_t));
     if (!unpacked_pixels) {
-        printf("Error: Failed to allocate memory for unpacked pixels (%zu bytes)\n", 
-               pixel_count * sizeof(uint16_t));
+        printf("Error: Failed to allocate memory for unpacked pixels\n");
         libmedia_session_release_frame(media_session, &frame);
         return -1;
     }
+
+    // 通过 unpack_sbggr10_image 解包RAW10数据
+    printf("Unpacking RAW10 data (%zu bytes) to 16-bit pixels...\n", frame.size);
+    int unpack_result = unpack_sbggr10_image((const uint8_t*)frame.data, frame.size,
+                                           unpacked_pixels, camera_width, camera_height);
     
-    // 解包 RAW10 数据
-    printf("Unpacking RAW10 data...\n");
-    if (unpack_sbggr10_image((const uint8_t*)frame.data, frame.size, 
-                            unpacked_pixels, camera_width, camera_height) != 0) {
-        printf("Error: Failed to unpack RAW10 image data\n");
+    if (unpack_result != 0) {
+        printf("Error: Failed to unpack RAW10 data\n");
         free(unpacked_pixels);
         libmedia_session_release_frame(media_session, &frame);
         return -1;
     }
     
-    printf("RAW10 data unpacked successfully to 16-bit pixels\n");
-    
-    // 保存解包后的像素数据到文件
+    printf("RAW10 data unpacked successfully to %zu 16-bit pixels\n", pixel_count);
+
+    // 保存解包后的16位像素数据到文件
     FILE* file = fopen(filename, "wb");
     if (!file) {
         printf("Error: Failed to create file %s: %s\n", filename, strerror(errno));
@@ -2357,25 +2345,24 @@ static int capture_raw_photo(void) {
         libmedia_session_release_frame(media_session, &frame);
         return -1;
     }
-    
-    // 写入解包后的16位像素数据
-    size_t written = fwrite(unpacked_pixels, sizeof(uint16_t), pixel_count, file);
+
+    // 写入解包后的像素数据
+    size_t data_size = pixel_count * sizeof(uint16_t);
+    size_t written = fwrite(unpacked_pixels, 1, data_size, file);
     fclose(file);
     
-    // 释放内存
+    // 释放缓冲区和帧
     free(unpacked_pixels);
-    
-    // 释放帧
     libmedia_session_release_frame(media_session, &frame);
-    
-    if (written != pixel_count) {
-        printf("Error: Incomplete write to %s (wrote %zu of %zu pixels)\n", 
-               filename, written, pixel_count);
+
+    if (written != data_size) {
+        printf("Error: Incomplete write to %s (wrote %zu of %zu bytes)\n", 
+               filename, written, data_size);
         unlink(filename); // 删除不完整的文件
         return -1;
     }
     
-    printf("Photo saved successfully: %s (%zu pixels, %dx%d unpacked RAW)\n", 
+    printf("Photo saved successfully: %s (%zu bytes, %dx%d 16-bit unpacked)\n", 
            filename, written, camera_width, camera_height);
     
     // 显示简短的拍照成功提示
@@ -2387,8 +2374,7 @@ static int capture_raw_photo(void) {
         } else {
             basename = filename;
         }
-        snprintf(photo_msg, sizeof(photo_msg), "Photo: %s (%dx%d unpacked)", 
-                basename, camera_width, camera_height);
+        snprintf(photo_msg, sizeof(photo_msg), "Photo: %s (%dx%d)", basename, camera_width, camera_height);
         lv_label_set_text(info_label, photo_msg);
         
         // 注意：这里简化处理，不使用定时器恢复信息显示
@@ -2432,9 +2418,6 @@ static int load_config_file(mxcamera_config_t* config) {
                 config->camera_width = atoi(value);
             } else if (strcmp(key, "camera_height") == 0) {
                 config->camera_height = atoi(value);
-            } else if (strcmp(key, "camera_device") == 0) {
-                strncpy(config->camera_device, value, sizeof(config->camera_device) - 1);
-                config->camera_device[sizeof(config->camera_device) - 1] = '\0';
             } else if (strcmp(key, "exposure") == 0) {
                 config->exposure = atoi(value);
             } else if (strcmp(key, "gain") == 0) {
@@ -2476,7 +2459,6 @@ static int save_config_file(const mxcamera_config_t* config) {
     fprintf(file, "[camera]\n");
     fprintf(file, "camera_width = %d\n", config->camera_width);
     fprintf(file, "camera_height = %d\n", config->camera_height);
-    fprintf(file, "camera_device = \"%s\"\n", config->camera_device);
     fprintf(file, "\n");
     fprintf(file, "[controls]\n");
     fprintf(file, "exposure = %d\n", config->exposure);
@@ -2498,8 +2480,6 @@ static void apply_config(const mxcamera_config_t* config) {
     // 应用摄像头配置
     camera_width = config->camera_width;
     camera_height = config->camera_height;
-    strncpy(camera_device, config->camera_device, sizeof(camera_device) - 1);
-    camera_device[sizeof(camera_device) - 1] = '\0';
     
     // 应用曝光和增益
     current_exposure = config->exposure;
@@ -2513,7 +2493,7 @@ static void apply_config(const mxcamera_config_t* config) {
     }
     
     printf("Config applied: %dx%d, device: %s, exposure: %d, gain: %d\n", 
-           camera_width, camera_height, camera_device, current_exposure, current_gain);
+           camera_width, camera_height, DEFAULT_CAMERA_DEVICE, current_exposure, current_gain);
 }
 
 /**
@@ -2525,8 +2505,6 @@ static void init_default_config(mxcamera_config_t* config) {
     // 设置默认值
     config->camera_width = DEFAULT_CAMERA_WIDTH;
     config->camera_height = DEFAULT_CAMERA_HEIGHT;
-    strncpy(config->camera_device, DEFAULT_CAMERA_DEVICE, sizeof(config->camera_device) - 1);
-    config->camera_device[sizeof(config->camera_device) - 1] = '\0';
     config->exposure = 128;
     config->gain = 128;
     config->exposure_step = 16;
@@ -2577,14 +2555,29 @@ static int parse_config_line(const char* line, char* key, char* value) {
     value[CONFIG_MAX_VALUE_LENGTH - 1] = '\0';
     
     // 去除首尾空白
-    trim_whitespace(key);
-    trim_whitespace(value);
+    char* trimmed_key = trim_whitespace(key);
+    char* trimmed_value = trim_whitespace(value);
+    
+    // 将处理后的结果复制回原变量
+    if (trimmed_key != key) {
+        memmove(key, trimmed_key, strlen(trimmed_key) + 1);
+    }
+    if (trimmed_value != value) {
+        memmove(value, trimmed_value, strlen(trimmed_value) + 1);
+    }
     
     // 处理带引号的字符串值
-    if (value[0] == '"' && value[strlen(value) - 1] == '"') {
+    size_t value_len = strlen(value);
+    if (value_len >= 2 && value[0] == '"' && value[value_len - 1] == '"') {
         // 去除引号
-        memmove(value, value + 1, strlen(value) - 1);
-        value[strlen(value) - 1] = '\0';
+        memmove(value, value + 1, value_len - 2);
+        value[value_len - 2] = '\0';
+        
+        // 去除引号后再次修剪空白
+        char* final_trimmed = trim_whitespace(value);
+        if (final_trimmed != value) {
+            memmove(value, final_trimmed, strlen(final_trimmed) + 1);
+        }
     }
     
     return 0;
