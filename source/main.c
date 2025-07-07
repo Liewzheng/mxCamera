@@ -30,6 +30,9 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <ctype.h>
 
 // 库头文件
 #include <gpio.h>
@@ -96,6 +99,26 @@ static int current_img_height = 240;
 #undef FPS_UPDATE_INTERVAL
 #define FPS_UPDATE_INTERVAL 1000000 // 1秒 (微秒)
 
+// 配置文件相关常量
+#define CONFIG_FILE_PATH "/root/Workspace/mxCamera_config.toml"
+#define CONFIG_MAX_LINE_LENGTH 256
+#define CONFIG_MAX_KEY_LENGTH 64
+#define CONFIG_MAX_VALUE_LENGTH 128
+
+/**
+ * @struct mxcamera_config
+ * @brief mxCamera 配置结构体
+ */
+typedef struct {
+    int32_t exposure;        // 曝光值
+    int32_t gain;           // 增益值
+    int exposure_step;      // 曝光调整步长
+    int gain_step;          // 增益调整步长
+    int camera_width;       // 摄像头宽度
+    int camera_height;      // 摄像头高度
+    char camera_device[256]; // 摄像头设备路径
+} mxcamera_config_t;
+
 // ============================================================================
 // 函数声明
 // ============================================================================
@@ -144,6 +167,19 @@ static int init_camera_controls(void);
 static void cleanup_camera_controls(void);
 static void update_exposure_value(int32_t new_value);
 static void update_gain_value(int32_t new_value);
+
+// 配置文件管理
+static int load_config_file(mxcamera_config_t* config);
+static int save_config_file(const mxcamera_config_t* config);
+static void apply_config(const mxcamera_config_t* config);
+static void init_default_config(mxcamera_config_t* config);
+static char* trim_whitespace(char* str);
+static int parse_config_line(const char* line, char* key, char* value);
+
+// 拍照功能
+static int capture_raw_photo(void);
+static int create_images_directory(void);
+static char* generate_photo_filename(void);
 
 // 系统资源监控
 static float get_cpu_usage(void);
@@ -237,6 +273,10 @@ static int32_t gain_value = 0;      // 增益值
 static int exposure_step = 16;       // 曝光调整步长
 static int gain_step = 32;           // 增益调整步长
 
+// 配置管理
+static mxcamera_config_t current_config;  // 当前配置
+static int config_loaded = 0;             // 配置是否已加载
+
 // ============================================================================
 // 工具函数
 // ============================================================================
@@ -248,6 +288,22 @@ static void signal_handler(int sig) {
     printf("\nReceived signal %d, cleaning up...\n", sig);
     exit_flag = 1;
     tcp_enabled = 0; // 停止TCP传输
+    
+    // 保存当前配置到文件
+    current_config.exposure = current_exposure;
+    current_config.gain = current_gain;
+    current_config.camera_width = camera_width;
+    current_config.camera_height = camera_height;
+    strncpy(current_config.camera_device, camera_device, sizeof(current_config.camera_device) - 1);
+    current_config.camera_device[sizeof(current_config.camera_device) - 1] = '\0';
+    current_config.exposure_step = exposure_step;
+    current_config.gain_step = gain_step;
+    
+    if (save_config_file(&current_config) == 0) {
+        printf("Configuration saved on exit\n");
+    } else {
+        printf("Warning: Failed to save configuration on exit\n");
+    }
     
     // 强制刷新输出缓冲区
     fflush(stdout);
@@ -300,7 +356,7 @@ static void print_usage(const char* program_name) {
     printf("  KEY0 - Toggle image display ON/OFF\n");
     printf("  KEY1 - Enable/Disable TCP transmission\n");
     printf("  KEY2 - Show/Hide settings menu\n");
-    printf("  KEY3 - Wake screen / Update activity\n");
+    printf("  KEY3 - Take photo (non-menu) / Confirm (menu)\n");
     printf("  Ctrl+C - Exit\n");
 }
 
@@ -1266,9 +1322,17 @@ static void handle_keys(void) {
                 if (menu_visible) {
                     menu_confirm_selection();
                 } else {
-                    // 非菜单模式下，KEY3 仅用于更新活动时间
+                    // 非菜单模式下，KEY3 用于拍照
+                    turn_screen_on(); // 确保屏幕打开
                     update_activity_time();
-                    printf("KEY3 pressed (CONFIRM)\n");
+                    
+                    printf("KEY3 pressed - Taking photo...\n");
+                    int result = capture_raw_photo();
+                    if (result == 0) {
+                        printf("Photo captured successfully\n");
+                    } else {
+                        printf("Photo capture failed\n");
+                    }
                 }
             }
             last_key3_state = current_key3;
@@ -1410,6 +1474,21 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
+    // 初始化默认配置
+    init_default_config(&current_config);
+    
+    // 尝试加载配置文件
+    printf("Loading configuration from %s...\n", CONFIG_FILE_PATH);
+    if (load_config_file(&current_config) == 0) {
+        printf("Configuration loaded successfully\n");
+        config_loaded = 1;
+        // 应用配置到全局变量
+        apply_config(&current_config);
+    } else {
+        printf("Using default configuration\n");
+        config_loaded = 0;
+    }
+    
     // 初始化 LVGL
     lv_init();
     
@@ -1528,7 +1607,7 @@ int main(int argc, char* argv[]) {
     printf("  KEY0 (PIN %d) - Toggle image display ON/OFF (camera keeps running)\n", KEY0_PIN);
     printf("  KEY1 (PIN %d) - Enable/Disable TCP transmission\n", KEY1_PIN);
     printf("  KEY2 (PIN %d) - Show/Hide settings menu (TCP & DISPLAY controls)\n", KEY2_PIN);
-    printf("  KEY3 (PIN %d) - Wake screen / Update activity\n", KEY3_PIN);
+    printf("  KEY3 (PIN %d) - Take photo (non-menu) / Confirm selection (menu)\n", KEY3_PIN);
     printf("  Ctrl+C - Exit\n");
     printf("Screen Management:\n");
     printf("  - Auto-sleep after 5s when display is OFF\n");
@@ -2064,6 +2143,12 @@ static void update_exposure_value(int32_t new_value) {
         current_exposure = new_value;
         printf("Exposure set to: %d\n", current_exposure);
         
+        // 更新配置并保存到文件
+        current_config.exposure = current_exposure;
+        if (save_config_file(&current_config) == 0) {
+            printf("Exposure value saved to config\n");
+        }
+        
         // 更新菜单显示
         if (menu_visible) {
             update_menu_selection();
@@ -2090,6 +2175,12 @@ static void update_gain_value(int32_t new_value) {
     if (libmedia_set_gain(subdev_handle, new_value) == 0) {
         current_gain = new_value;
         printf("Gain set to: %d\n", current_gain);
+        
+        // 更新配置并保存到文件
+        current_config.gain = current_gain;
+        if (save_config_file(&current_config) == 0) {
+            printf("Gain value saved to config\n");
+        }
         
         // 更新菜单显示
         if (menu_visible) {
@@ -2149,6 +2240,354 @@ static void cleanup_camera_controls(void) {
         subdev_handle = -1;
         printf("Camera controls cleaned up\n");
     }
+}
+
+/**
+ * @brief 创建图片保存目录
+ */
+static int create_images_directory(void) {
+    // 创建根目录
+    if (mkdir("/root/images", 0755) != 0 && errno != EEXIST) {
+        printf("Error: Failed to create /root/images directory: %s\n", strerror(errno));
+        return -1;
+    }
+    
+    // 创建按日期分类的子目录
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    
+    char date_dir[128];
+    strftime(date_dir, sizeof(date_dir), "/root/images/%Y-%m-%d", tm_info);
+    
+    if (mkdir(date_dir, 0755) != 0 && errno != EEXIST) {
+        printf("Warning: Failed to create date directory %s: %s\n", date_dir, strerror(errno));
+        // 仍然继续，使用根目录
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 生成照片文件名
+ */
+static char* generate_photo_filename(void) {
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    
+    // 生成文件名字符串，包含分辨率信息
+    static char filename[256];
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%H-%M-%S", tm_info);
+    
+    // 构建包含分辨率的文件名，标明是解包后的16位像素数据
+    snprintf(filename, sizeof(filename), "/root/images/%04d-%02d-%02d/%s_%dx%d_unpacked.raw",
+             tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+             timestamp, camera_width, camera_height);
+    
+    return filename;
+}
+
+/**
+ * @brief 捕获RAW格式照片
+ */
+static int capture_raw_photo(void) {
+    if (!media_session) {
+        printf("Error: Camera not initialized\n");
+        return -1;
+    }
+    
+    // 创建保存目录
+    if (create_images_directory() != 0) {
+        return -1;
+    }
+    
+    // 生成文件名
+    char* filename = generate_photo_filename();
+    
+    printf("Capturing photo to: %s\n", filename);
+    printf("Target resolution: %dx%d (RAW10 format)\n", camera_width, camera_height);
+    
+    // 捕获一帧
+    media_frame_t frame;
+    int result = libmedia_session_capture_frame(media_session, &frame, 5000); // 5秒超时
+    
+    if (result != 0) {
+        printf("Error: Failed to capture frame for photo\n");
+        return -1;
+    }
+    
+    // 验证帧数据尺寸是否与设置的分辨率匹配
+    size_t expected_size = camera_width * camera_height * 2; // RAW10 约2字节/像素
+    if (frame.size != expected_size) {
+        printf("Warning: Frame size mismatch - expected %zu bytes (%dx%d*2), got %zu bytes\n",
+               expected_size, camera_width, camera_height, frame.size);
+        printf("Continuing with actual frame size...\n");
+    } else {
+        printf("Frame size verified: %zu bytes (%dx%d RAW10)\n", 
+               frame.size, camera_width, camera_height);
+    }
+    
+    // 分配内存用于解包后的像素数据
+    size_t pixel_count = camera_width * camera_height;
+    uint16_t* unpacked_pixels = (uint16_t*)malloc(pixel_count * sizeof(uint16_t));
+    if (!unpacked_pixels) {
+        printf("Error: Failed to allocate memory for unpacked pixels (%zu bytes)\n", 
+               pixel_count * sizeof(uint16_t));
+        libmedia_session_release_frame(media_session, &frame);
+        return -1;
+    }
+    
+    // 解包 RAW10 数据
+    printf("Unpacking RAW10 data...\n");
+    if (unpack_sbggr10_image((const uint8_t*)frame.data, frame.size, 
+                            unpacked_pixels, camera_width, camera_height) != 0) {
+        printf("Error: Failed to unpack RAW10 image data\n");
+        free(unpacked_pixels);
+        libmedia_session_release_frame(media_session, &frame);
+        return -1;
+    }
+    
+    printf("RAW10 data unpacked successfully to 16-bit pixels\n");
+    
+    // 保存解包后的像素数据到文件
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        printf("Error: Failed to create file %s: %s\n", filename, strerror(errno));
+        free(unpacked_pixels);
+        libmedia_session_release_frame(media_session, &frame);
+        return -1;
+    }
+    
+    // 写入解包后的16位像素数据
+    size_t written = fwrite(unpacked_pixels, sizeof(uint16_t), pixel_count, file);
+    fclose(file);
+    
+    // 释放内存
+    free(unpacked_pixels);
+    
+    // 释放帧
+    libmedia_session_release_frame(media_session, &frame);
+    
+    if (written != pixel_count) {
+        printf("Error: Incomplete write to %s (wrote %zu of %zu pixels)\n", 
+               filename, written, pixel_count);
+        unlink(filename); // 删除不完整的文件
+        return -1;
+    }
+    
+    printf("Photo saved successfully: %s (%zu pixels, %dx%d unpacked RAW)\n", 
+           filename, written, camera_width, camera_height);
+    
+    // 显示简短的拍照成功提示
+    if (info_label) {
+        static char photo_msg[128];
+        char* basename = strrchr(filename, '/');
+        if (basename) {
+            basename++; // 跳过 '/'
+        } else {
+            basename = filename;
+        }
+        snprintf(photo_msg, sizeof(photo_msg), "Photo: %s (%dx%d unpacked)", 
+                basename, camera_width, camera_height);
+        lv_label_set_text(info_label, photo_msg);
+        
+        // 注意：这里简化处理，不使用定时器恢复信息显示
+        // 用户可以通过其他操作来刷新信息显示
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 加载配置文件
+ */
+static int load_config_file(mxcamera_config_t* config) {
+    if (!config) return -1;
+    
+    // 尝试打开配置文件
+    FILE* file = fopen(CONFIG_FILE_PATH, "r");
+    if (!file) {
+        printf("Warning: Could not open config file %s: %s\n", CONFIG_FILE_PATH, strerror(errno));
+        return -1;
+    }
+    
+    char line[CONFIG_MAX_LINE_LENGTH];
+    char key[CONFIG_MAX_KEY_LENGTH];
+    char value[CONFIG_MAX_VALUE_LENGTH];
+    
+    // 逐行读取配置
+    while (fgets(line, sizeof(line), file)) {
+        // 去除行尾换行符
+        line[strcspn(line, "\r\n")] = 0;
+        
+        // 跳过空行和注释
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        
+        // 解析键值对
+        if (parse_config_line(line, key, value) == 0) {
+            // 根据键设置配置项
+            if (strcmp(key, "camera_width") == 0) {
+                config->camera_width = atoi(value);
+            } else if (strcmp(key, "camera_height") == 0) {
+                config->camera_height = atoi(value);
+            } else if (strcmp(key, "camera_device") == 0) {
+                strncpy(config->camera_device, value, sizeof(config->camera_device) - 1);
+                config->camera_device[sizeof(config->camera_device) - 1] = '\0';
+            } else if (strcmp(key, "exposure") == 0) {
+                config->exposure = atoi(value);
+            } else if (strcmp(key, "gain") == 0) {
+                config->gain = atoi(value);
+            } else if (strcmp(key, "exposure_step") == 0) {
+                config->exposure_step = atoi(value);
+            } else if (strcmp(key, "gain_step") == 0) {
+                config->gain_step = atoi(value);
+            }
+        }
+    }
+    
+    fclose(file);
+    return 0;
+}
+
+/**
+ * @brief 保存配置文件
+ */
+static int save_config_file(const mxcamera_config_t* config) {
+    if (!config) return -1;
+    
+    // 创建目录（如果不存在）
+    char dir_path[] = "/root/Workspace";
+    mkdir(dir_path, 0755);
+    
+    // 尝试打开配置文件
+    FILE* file = fopen(CONFIG_FILE_PATH, "w");
+    if (!file) {
+        printf("Error: Could not open config file %s for writing: %s\n", CONFIG_FILE_PATH, strerror(errno));
+        return -1;
+    }
+    
+    // 写入 TOML 格式的配置文件
+    fprintf(file, "# mxCamera Configuration File\n");
+    fprintf(file, "# This file is automatically generated and updated by mxCamera\n");
+    fprintf(file, "# Last updated: %s\n", __DATE__ " " __TIME__);
+    fprintf(file, "\n");
+    fprintf(file, "[camera]\n");
+    fprintf(file, "camera_width = %d\n", config->camera_width);
+    fprintf(file, "camera_height = %d\n", config->camera_height);
+    fprintf(file, "camera_device = \"%s\"\n", config->camera_device);
+    fprintf(file, "\n");
+    fprintf(file, "[controls]\n");
+    fprintf(file, "exposure = %d\n", config->exposure);
+    fprintf(file, "gain = %d\n", config->gain);
+    fprintf(file, "exposure_step = %d\n", config->exposure_step);
+    fprintf(file, "gain_step = %d\n", config->gain_step);
+    
+    fclose(file);
+    printf("Configuration saved to %s\n", CONFIG_FILE_PATH);
+    return 0;
+}
+
+/**
+ * @brief 应用配置
+ */
+static void apply_config(const mxcamera_config_t* config) {
+    if (!config) return;
+    
+    // 应用摄像头配置
+    camera_width = config->camera_width;
+    camera_height = config->camera_height;
+    strncpy(camera_device, config->camera_device, sizeof(camera_device) - 1);
+    camera_device[sizeof(camera_device) - 1] = '\0';
+    
+    // 应用曝光和增益
+    current_exposure = config->exposure;
+    current_gain = config->gain;
+    exposure_step = config->exposure_step;
+    gain_step = config->gain_step;
+    
+    // 更新菜单显示
+    if (menu_visible) {
+        update_menu_selection();
+    }
+    
+    printf("Config applied: %dx%d, device: %s, exposure: %d, gain: %d\n", 
+           camera_width, camera_height, camera_device, current_exposure, current_gain);
+}
+
+/**
+ * @brief 初始化默认配置
+ */
+static void init_default_config(mxcamera_config_t* config) {
+    if (!config) return;
+    
+    // 设置默认值
+    config->camera_width = DEFAULT_CAMERA_WIDTH;
+    config->camera_height = DEFAULT_CAMERA_HEIGHT;
+    strncpy(config->camera_device, DEFAULT_CAMERA_DEVICE, sizeof(config->camera_device) - 1);
+    config->camera_device[sizeof(config->camera_device) - 1] = '\0';
+    config->exposure = 128;
+    config->gain = 128;
+    config->exposure_step = 16;
+    config->gain_step = 32;
+}
+
+/**
+ * @brief 去除字符串首尾空白字符
+ */
+static char* trim_whitespace(char* str) {
+    char* end;
+    
+    // 去除开头空白
+    while (isspace((unsigned char)*str)) str++;
+    
+    // 全部为空白
+    if (*str == 0)  return str;
+    
+    // 去除结尾空白
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) end--;
+    
+    // 结尾加上空字符
+    *(end+1) = 0;
+    
+    return str;
+}
+
+/**
+ * @brief 解析配置文件中的一行
+ */
+static int parse_config_line(const char* line, char* key, char* value) {
+    const char* delim = "=";
+    char* eq_pos = strstr(line, delim);
+    
+    if (!eq_pos) {
+        return -1; // 没有找到分隔符
+    }
+    
+    // 提取键
+    size_t key_len = eq_pos - line;
+    strncpy(key, line, key_len);
+    key[key_len] = '\0';
+    
+    // 提取值
+    char* val_pos = eq_pos + strlen(delim);
+    strncpy(value, val_pos, CONFIG_MAX_VALUE_LENGTH - 1);
+    value[CONFIG_MAX_VALUE_LENGTH - 1] = '\0';
+    
+    // 去除首尾空白
+    trim_whitespace(key);
+    trim_whitespace(value);
+    
+    // 处理带引号的字符串值
+    if (value[0] == '"' && value[strlen(value) - 1] == '"') {
+        // 去除引号
+        memmove(value, value + 1, strlen(value) - 1);
+        value[strlen(value) - 1] = '\0';
+    }
+    
+    return 0;
 }
 
 
