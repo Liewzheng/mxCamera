@@ -121,8 +121,10 @@ check_first_run
 # 脚本参数处理
 BUILD_TYPE="Release"
 CLEAN=false
+FORCE_CLEAN=false
 VERBOSE=false
 JOBS=$(nproc)
+INCREMENTAL=true
 
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
@@ -133,6 +135,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         -c|--clean)
             CLEAN=true
+            shift
+            ;;
+        --force-clean)
+            FORCE_CLEAN=true
+            CLEAN=true
+            shift
+            ;;
+        --full)
+            CLEAN=true
+            INCREMENTAL=false
             shift
             ;;
         -v|--verbose)
@@ -146,11 +158,18 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "用法: $0 [选项]"
             echo "选项:"
-            echo "  -d, --debug     编译 Debug 版本"
-            echo "  -c, --clean     清理后重新编译"
-            echo "  -v, --verbose   显示详细编译信息"
-            echo "  -j, --jobs N    使用 N 个并行作业"
-            echo "  -h, --help      显示此帮助信息"
+            echo "  -d, --debug       编译 Debug 版本"
+            echo "  -c, --clean       清理后重新编译"
+            echo "  --force-clean     强制完全清理（包括子模块）"
+            echo "  --full            执行完全编译（等同于 --clean）"
+            echo "  -v, --verbose     显示详细编译信息"
+            echo "  -j, --jobs N      使用 N 个并行作业"
+            echo "  -h, --help        显示此帮助信息"
+            echo ""
+            echo "增量编译模式:"
+            echo "  默认执行增量编译，只重新编译有变化的部分"
+            echo "  子模块仅在源码有更新时重新编译"
+            echo "  主项目根据依赖关系智能编译"
             exit 0
             ;;
         *)
@@ -678,21 +697,111 @@ check_submodules() {
 
 # 清理编译目录
 clean_build() {
-    if [ "$CLEAN" = true ] || [ ! -d "build" ]; then
+    if [ "$FORCE_CLEAN" = true ]; then
+        print_status "执行强制完全清理..."
+        rm -rf build
+        mkdir -p build
+        mkdir -p build/lib
+        mkdir -p build/bin
+        return
+    fi
+    
+    if [ "$CLEAN" = true ]; then
         print_status "清理编译目录..."
         rm -rf build
         mkdir -p build
         mkdir -p build/lib
         mkdir -p build/bin
+        return
     fi
+    
+    # 增量编译模式：只创建必要的目录
+    if [ ! -d "build" ]; then
+        print_status "创建编译目录（首次编译）..."
+        mkdir -p build
+        mkdir -p build/lib
+        mkdir -p build/bin
+    else
+        print_status "使用现有编译目录（增量编译模式）"
+    fi
+}
+
+# 检查子模块是否需要重新编译
+check_submodule_needs_rebuild() {
+    local submodule="$1"
+    local submodule_dir="$PROJECT_ROOT/$submodule"
+    local submodule_build_dir="$PROJECT_ROOT/build/$submodule"
+    local lib_pattern="$PROJECT_ROOT/build/lib/lib${submodule#lib}.*"
+    
+    # 如果是强制清理模式，总是需要重新编译
+    if [ "$FORCE_CLEAN" = true ] || [ "$CLEAN" = true ]; then
+        return 0  # 需要重新编译
+    fi
+    
+    # 如果构建目录不存在，需要重新编译
+    if [ ! -d "$submodule_build_dir" ]; then
+        print_status "$submodule: 构建目录不存在，需要编译"
+        return 0
+    fi
+    
+    # 如果库文件不存在，需要重新编译
+    if ! ls $lib_pattern &>/dev/null; then
+        print_status "$submodule: 库文件不存在，需要编译"
+        return 0
+    fi
+    
+    # 获取最新的库文件时间
+    local lib_time=$(stat -c %Y $lib_pattern 2>/dev/null | sort -n | tail -1)
+    if [ -z "$lib_time" ]; then
+        print_status "$submodule: 无法获取库文件时间，需要编译"
+        return 0
+    fi
+    
+    # 检查源代码是否有更新
+    local source_dirs=()
+    if [ "$submodule" = "liblvgl" ]; then
+        source_dirs=("$submodule_dir/lvgl" "$submodule_dir/lv_drivers" "$submodule_dir")
+    else
+        source_dirs=("$submodule_dir/source" "$submodule_dir/src" "$submodule_dir/include" "$submodule_dir/inc" "$submodule_dir")
+    fi
+    
+    local newest_source_time=0
+    for source_dir in "${source_dirs[@]}"; do
+        if [ -d "$source_dir" ]; then
+            local dir_time=$(find "$source_dir" -name "*.c" -o -name "*.h" -o -name "*.cpp" -o -name "*.hpp" -o -name "CMakeLists.txt" 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
+            if [ -n "$dir_time" ] && [ "$dir_time" -gt "$newest_source_time" ]; then
+                newest_source_time="$dir_time"
+            fi
+        fi
+    done
+    
+    if [ "$newest_source_time" -gt "$lib_time" ]; then
+        print_status "$submodule: 源代码有更新，需要重新编译"
+        return 0
+    fi
+    
+    # 检查 CMakeLists.txt 是否有更新
+    if [ -f "$submodule_dir/CMakeLists.txt" ]; then
+        local cmake_time=$(stat -c %Y "$submodule_dir/CMakeLists.txt")
+        if [ "$cmake_time" -gt "$lib_time" ]; then
+            print_status "$submodule: CMakeLists.txt 有更新，需要重新编译"
+            return 0
+        fi
+    fi
+    
+    print_status "$submodule: 无需重新编译（源码无变化）"
+    return 1  # 不需要重新编译
 }
 
 # 编译子模块
 build_submodules() {
-    print_status "开始编译所有子模块..."
+    print_status "开始编译子模块（增量模式：$INCREMENTAL）..."
     
     LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging")
     TOOLCHAIN_PREFIX_PATH="$PROJECT_ROOT/toolchains"
+    
+    local skipped_count=0
+    local built_count=0
     
     for SUBMODULE in "${LIB_SUBMODULES[@]}"; do
         SUBMODULE_DIR="$PROJECT_ROOT/$SUBMODULE"
@@ -703,7 +812,15 @@ build_submodules() {
             continue
         fi
         
+        # 检查子模块是否需要重新编译
+        if ! check_submodule_needs_rebuild "$SUBMODULE"; then
+            print_success "$SUBMODULE: 跳过编译（无需重新编译）"
+            ((skipped_count++))
+            continue
+        fi
+        
         print_status "编译子模块: $SUBMODULE"
+        ((built_count++))
         
         # 清理并创建子模块构建目录
         rm -rf "$SUBMODULE_BUILD_DIR"
@@ -761,7 +878,7 @@ build_submodules() {
         cd "$PROJECT_ROOT"
     done
     
-    print_success "所有子模块编译完成"
+    print_success "子模块编译完成 (编译: $built_count, 跳过: $skipped_count)"
     
     # 显示编译结果
     print_status "子模块库文件:"
