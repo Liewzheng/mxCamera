@@ -1119,6 +1119,7 @@ main() {
     echo "并行作业: $JOBS"
     echo "详细输出: $VERBOSE"
     echo "清理重建: $CLEAN"
+    echo "增量编译: $INCREMENTAL"
     echo ""
     
     check_tools
