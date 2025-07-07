@@ -1370,7 +1370,7 @@ static void init_lvgl_ui(void) {
     
     // 创建设置菜单面板 (初始隐藏) - 重新设计为导航式菜单
     menu_panel = lv_obj_create(scr);
-    lv_obj_set_size(menu_panel, 200, 160);
+    lv_obj_set_size(menu_panel, 200, 170);
     lv_obj_center(menu_panel);
     lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
