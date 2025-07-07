@@ -122,6 +122,16 @@ static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int sr
 static void update_fps(void);
 static void update_image_display(void);
 static void init_lvgl_ui(void);
+static void update_time_display(void);
+static void show_settings_menu(void);
+static void hide_settings_menu(void);
+static void update_menu_selection(void);
+static void menu_navigate_up(void);
+static void menu_navigate_down(void);
+static void menu_confirm_selection(void);
+static void menu_tcp_event_cb(lv_event_t* e);
+static void menu_display_event_cb(lv_event_t* e);
+static void menu_close_event_cb(lv_event_t* e);
 
 // 系统资源监控
 static float get_cpu_usage(void);
@@ -157,7 +167,10 @@ static volatile int camera_paused = 0;      // 摄像头采集暂停状态
 static volatile int display_enabled = 1;    // 图像显示开关状态 (KEY0控制)
 static volatile int tcp_enabled = 0;
 static volatile int screen_on = 1;          // 屏幕开关状态
+static volatile int menu_visible = 0;       // 设置菜单显示状态
+static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY, 2=CLOSE)
 static struct timeval last_activity_time;  // 最后活动时间
+static struct timeval last_time_update;    // 最后时间更新时间
 
 // TCP 传输状态
 static volatile int client_connected = 0;
@@ -170,9 +183,15 @@ static media_session_t* media_session = NULL;
 
 // LVGL 对象
 static lv_obj_t* img_canvas = NULL;
-static lv_obj_t* status_label = NULL;
+// 底部状态标签已禁用
+// static lv_obj_t* status_label = NULL;
 static lv_obj_t* info_label = NULL;
-static lv_obj_t* tcp_label = NULL;
+// static lv_obj_t* tcp_label = NULL;
+static lv_obj_t* time_label = NULL;  // 时间显示标签
+static lv_obj_t* menu_panel = NULL;  // 设置菜单面板
+static lv_obj_t* menu_tcp_btn = NULL;  // TCP 按钮
+static lv_obj_t* menu_display_btn = NULL;  // DISPLAY 按钮
+// static lv_obj_t* menu_close_btn = NULL;  // 关闭按钮
 
 // 帧率统计
 static uint32_t frame_count = 0;
@@ -249,7 +268,8 @@ static void print_usage(const char* program_name) {
     printf("\nControls:\n");
     printf("  KEY0 - Toggle image display ON/OFF\n");
     printf("  KEY1 - Enable/Disable TCP transmission\n");
-    printf("  KEY2/KEY3 - Wake screen / Update activity\n");
+    printf("  KEY2 - Show/Hide settings menu\n");
+    printf("  KEY3 - Wake screen / Update activity\n");
     printf("  Ctrl+C - Exit\n");
 }
 
@@ -564,8 +584,11 @@ static void turn_screen_off(void) {
     // 隐藏所有UI元素
     if (img_canvas) lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
     if (info_label) lv_obj_add_flag(info_label, LV_OBJ_FLAG_HIDDEN);
-    if (status_label) lv_obj_add_flag(status_label, LV_OBJ_FLAG_HIDDEN);
-    if (tcp_label) lv_obj_add_flag(tcp_label, LV_OBJ_FLAG_HIDDEN);
+    if (time_label) lv_obj_add_flag(time_label, LV_OBJ_FLAG_HIDDEN);
+    if (menu_panel) {
+        lv_obj_add_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
+        menu_visible = 0; // 重置菜单状态
+    }
     
     // 清空屏幕为黑色
     lv_obj_t* scr = lv_disp_get_scr_act(NULL);
@@ -587,8 +610,8 @@ static void turn_screen_on(void) {
     // 显示所有UI元素
     if (img_canvas) lv_obj_clear_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
     if (info_label) lv_obj_clear_flag(info_label, LV_OBJ_FLAG_HIDDEN);
-    if (status_label) lv_obj_clear_flag(status_label, LV_OBJ_FLAG_HIDDEN);
-    if (tcp_label) lv_obj_clear_flag(tcp_label, LV_OBJ_FLAG_HIDDEN);
+    if (time_label) lv_obj_clear_flag(time_label, LV_OBJ_FLAG_HIDDEN);
+    // 注意：菜单面板保持隐藏状态，不自动显示
     
     // 更新活动时间
     update_activity_time();
@@ -757,11 +780,10 @@ static void update_system_info(void) {
         float mem_usage = get_memory_usage();
         
         char info_text[64];
-        // 格式：图像大小 帧率 CPU占用率% 内存占用率%
-        // 例如：1920x1080 30.4 98% 70%
+        // 格式：帧率 CPU占用率% 内存占用率%
+        // 例如：30.4FPS 98% 70%
         snprintf(info_text, sizeof(info_text), 
-                "%dx%d  %.1fFPS  %.0f%%  %.0f%%", 
-                camera_width, camera_height,
+                "%.1fFPS  %.0f%%  %.0f%%", 
                 (double)current_fps, 
                 (double)(cpu_usage >= 0 ? cpu_usage : 0),
                 (double)(mem_usage >= 0 ? mem_usage : 0));
@@ -1099,7 +1121,7 @@ static void* camera_thread(void* arg) {
 // ============================================================================
 
 /**
- * @brief 处理按键输入 (优化响应速度，添加KEY1控制TCP传输，添加屏幕唤醒)
+ * @brief 处理按键输入 (新设计：KEY1=上，KEY0=下，KEY3=确认，KEY2=设置菜单)
  */
 static void handle_keys(void) {
     static int last_key0_state = 1;
@@ -1111,15 +1133,14 @@ static void handle_keys(void) {
     static int key2_debounce_count = 0;
     static int key3_debounce_count = 0;
     static struct timeval last_key_check = {0};
-    const int debounce_threshold = 3; // 降低去抖动阈值，提高响应速度
+    const int debounce_threshold = 3;
     
-    // 限制按键检查频率，但保持足够的响应速度
+    // 限制按键检查频率
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
     long time_since_last_check = (current_time.tv_sec - last_key_check.tv_sec) * 1000000 +
                                 (current_time.tv_usec - last_key_check.tv_usec);
     
-    // 每1ms检查一次按键状态
     if (time_since_last_check < 1000) {
         return;
     }
@@ -1143,129 +1164,19 @@ static void handle_keys(void) {
     // 屏幕开启时才处理按键功能
     if (!screen_on) return;
     
-    // KEY0 去抖动处理 (图像显示开关 - 不影响摄像头采集和TCP传输)
-    if (current_key0 == last_key0_state) {
-        key0_debounce_count = 0;
-    } else {
-        key0_debounce_count++;
-        if (key0_debounce_count >= debounce_threshold) {
-            if (last_key0_state == 1 && current_key0 == 0) {
-                // KEY0 按下事件 - 图像显示开关
-                display_enabled = !display_enabled;
-                
-                printf("Display %s (camera continues running)\n", 
-                       display_enabled ? "ENABLED" : "DISABLED");
-                
-                // 更新活动时间
-                update_activity_time();
-                
-                // 更新状态显示
-                if (status_label) {
-                    lv_label_set_text(status_label, display_enabled ? "DISPLAY: ON" : "DISPLAY: OFF");
-                    lv_obj_set_style_text_color(status_label, 
-                                               display_enabled ? lv_color_make(0, 255, 0) : lv_color_make(255, 255, 0), 0);
-                }
-                
-                // 如果禁用显示，隐藏图像；如果启用显示，显示图像
-                if (img_canvas) {
-                    if (display_enabled) {
-                        lv_obj_clear_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
-                    } else {
-                        lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
-                    }
-                }
-            }
-            last_key0_state = current_key0;
-            key0_debounce_count = 0;
-        }
-    }
-    
-    // KEY1 去抖动处理 (TCP传输开关 - 独立于摄像头和显示状态)
+    // KEY1 去抖动处理 (上键 - 菜单导航)
     if (current_key1 == last_key1_state) {
         key1_debounce_count = 0;
     } else {
         key1_debounce_count++;
         if (key1_debounce_count >= debounce_threshold) {
             if (last_key1_state == 1 && current_key1 == 0) {
-                // KEY1 按下事件 - TCP传输开关
-                tcp_enabled = !tcp_enabled;
-                
-                printf("TCP transmission %s\n", tcp_enabled ? "ENABLED" : "DISABLED");
-                
-                // 更新活动时间
-                update_activity_time();
-                
-                if (tcp_enabled) {
-                    // 启动TCP传输
-                    if (server_fd < 0) {
-                        server_fd = create_server(DEFAULT_PORT);
-                        if (server_fd >= 0) {
-                            if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0) {
-                                printf("TCP server started successfully\n");
-                                // 更新TCP状态显示
-                                if (tcp_label) {
-                                    lv_label_set_text(tcp_label, "TCP: ON");
-                                    lv_obj_set_style_text_color(tcp_label, lv_color_make(0, 255, 255), 0);
-                                }
-                            } else {
-                                printf("Failed to create TCP thread\n");
-                                close(server_fd);
-                                server_fd = -1;
-                                tcp_enabled = 0;
-                            }
-                        } else {
-                            printf("Failed to create TCP server\n");
-                            tcp_enabled = 0;
-                        }
-                    }
+                if (menu_visible) {
+                    menu_navigate_up();
                 } else {
-                    // 停止TCP传输
-                    printf("Stopping TCP transmission...\n");
-                    
-                    // 关闭客户端连接
-                    if (client_connected) {
-                        shutdown(client_fd, SHUT_RDWR);
-                        close(client_fd);
-                        client_connected = 0;
-                        client_fd = -1;
-                        printf("Client connection closed\n");
-                    }
-                    
-                    // 关闭服务器socket
-                    if (server_fd >= 0) {
-                        shutdown(server_fd, SHUT_RDWR);
-                        close(server_fd);
-                        server_fd = -1;
-                        printf("Server socket closed\n");
-                    }
-                    
-                    // 等待TCP线程退出
-                    pthread_cond_broadcast(&frame_ready); // 唤醒TCP线程
-                    void* tcp_ret;
-                    struct timespec timeout;
-                    clock_gettime(CLOCK_REALTIME, &timeout);
-                    timeout.tv_sec += 2; // 2秒超时
-                    
-                    int join_result = pthread_timedjoin_np(tcp_thread_id, &tcp_ret, &timeout);
-                    if (join_result == 0) {
-                        printf("TCP thread exited successfully\n");
-                    } else if (join_result == ETIMEDOUT) {
-                        printf("Warning: TCP thread timeout, forcing cancel\n");
-                        pthread_cancel(tcp_thread_id);
-                        pthread_join(tcp_thread_id, NULL);
-                    } else {
-                        printf("Warning: TCP thread join failed: %d\n", join_result);
-                    }
-                    
-                    // 短暂延迟确保端口完全释放
-                    usleep(100000); // 100ms
-                    
-                    // 更新TCP状态显示
-                    if (tcp_label) {
-                        lv_label_set_text(tcp_label, "TCP: OFF");
-                        lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
-                    }
-                    printf("TCP transmission stopped completely\n");
+                    // 非菜单模式下，KEY1 仅用于更新活动时间
+                    update_activity_time();
+                    printf("KEY1 pressed (UP)\n");
                 }
             }
             last_key1_state = current_key1;
@@ -1273,31 +1184,61 @@ static void handle_keys(void) {
         }
     }
     
-    // KEY2 和 KEY3 去抖动处理（仅用于屏幕唤醒）
+    // KEY0 去抖动处理 (下键 - 菜单导航)
+    if (current_key0 == last_key0_state) {
+        key0_debounce_count = 0;
+    } else {
+        key0_debounce_count++;
+        if (key0_debounce_count >= debounce_threshold) {
+            if (last_key0_state == 1 && current_key0 == 0) {
+                if (menu_visible) {
+                    menu_navigate_down();
+                } else {
+                    // 非菜单模式下，KEY0 仅用于更新活动时间
+                    update_activity_time();
+                    printf("KEY0 pressed (DOWN)\n");
+                }
+            }
+            last_key0_state = current_key0;
+            key0_debounce_count = 0;
+        }
+    }
+    
+    // KEY2 去抖动处理 (设置菜单开关)
     if (current_key2 == last_key2_state) {
         key2_debounce_count = 0;
     } else {
         key2_debounce_count++;
         if (key2_debounce_count >= debounce_threshold) {
             if (last_key2_state == 1 && current_key2 == 0) {
-                // KEY2 按下事件 - 仅更新活动时间
+                // KEY2 按下事件 - 切换设置菜单显示状态
+                if (menu_visible) {
+                    hide_settings_menu();
+                } else {
+                    show_settings_menu();
+                }
                 update_activity_time();
-                printf("KEY2 pressed (activity updated)\n");
+                printf("KEY2 pressed (Settings Menu %s)\n", menu_visible ? "shown" : "hidden");
             }
             last_key2_state = current_key2;
             key2_debounce_count = 0;
         }
     }
     
+    // KEY3 去抖动处理 (确认键)
     if (current_key3 == last_key3_state) {
         key3_debounce_count = 0;
     } else {
         key3_debounce_count++;
         if (key3_debounce_count >= debounce_threshold) {
             if (last_key3_state == 1 && current_key3 == 0) {
-                // KEY3 按下事件 - 仅更新活动时间
-                update_activity_time();
-                printf("KEY3 pressed (activity updated)\n");
+                if (menu_visible) {
+                    menu_confirm_selection();
+                } else {
+                    // 非菜单模式下，KEY3 仅用于更新活动时间
+                    update_activity_time();
+                    printf("KEY3 pressed (CONFIRM)\n");
+                }
             }
             last_key3_state = current_key3;
             key3_debounce_count = 0;
@@ -1322,9 +1263,9 @@ static void init_lvgl_ui(void) {
     lv_obj_set_pos(img_canvas, 0, 0);
     lv_obj_set_size(img_canvas, 320, 240);  // 强制使用全屏尺寸
     
-    // 创建系统信息标签 (左上角，合并显示图像大小、帧率、CPU和内存占用)
+    // 创建系统信息标签 (左上角，显示帧率、CPU和内存占用)
     info_label = lv_label_create(scr);
-    lv_label_set_text(info_label, "0x0 0.0 0% 0%");
+    lv_label_set_text(info_label, "0.0FPS 0% 0%");
     lv_obj_set_style_text_color(info_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(info_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(info_label, lv_color_make(0, 0, 0), 0);
@@ -1332,26 +1273,67 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_pad_all(info_label, 2, 0);
     lv_obj_align(info_label, LV_ALIGN_TOP_LEFT, 5, 5);
     
-    // 创建状态标签 (右下角，替代按键提示)
-    status_label = lv_label_create(scr);
-    lv_label_set_text(status_label, "DISPLAY:ON");
-    lv_obj_set_style_text_color(status_label, lv_color_make(0, 255, 0), 0);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-    // 添加半透明背景以提高可读性
-    lv_obj_set_style_bg_color(status_label, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(status_label, LV_OPA_50, 0);
-    lv_obj_set_style_pad_all(status_label, 2, 0);
-    lv_obj_align(status_label, LV_ALIGN_BOTTOM_RIGHT, -5, -5);
+    // 创建时间显示标签 (右上角，显示当前时间)
+    time_label = lv_label_create(scr);
+    lv_label_set_text(time_label, "00:00");
+    lv_obj_set_style_text_color(time_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(time_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(time_label, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(time_label, 2, 0);
+    lv_obj_align(time_label, LV_ALIGN_TOP_RIGHT, -5, 5);
     
-    // 创建TCP状态标签 (左下角，显示TCP传输状态)
-    tcp_label = lv_label_create(scr);
-    lv_label_set_text(tcp_label, "TCP: OFF");
-    lv_obj_set_style_text_color(tcp_label, lv_color_make(128, 128, 128), 0);
-    lv_obj_set_style_text_font(tcp_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_bg_color(tcp_label, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(tcp_label, LV_OPA_50, 0);
-    lv_obj_set_style_pad_all(tcp_label, 2, 0);
-    lv_obj_align(tcp_label, LV_ALIGN_BOTTOM_LEFT, 5, -5);
+    // 底部状态标签已关闭显示
+    // status_label = lv_label_create(scr);
+    // tcp_label = lv_label_create(scr);
+    
+    // 创建设置菜单面板 (初始隐藏) - 重新设计为导航式菜单
+    menu_panel = lv_obj_create(scr);
+    lv_obj_set_size(menu_panel, 180, 140);
+    lv_obj_center(menu_panel);
+    lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
+    lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(menu_panel, lv_color_white(), 0);
+    lv_obj_set_style_border_width(menu_panel, 2, 0);
+    lv_obj_set_style_radius(menu_panel, 10, 0);
+    lv_obj_add_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
+    
+    // 菜单标题
+    lv_obj_t* menu_title = lv_label_create(menu_panel);
+    lv_label_set_text(menu_title, "Settings Menu");
+    lv_obj_set_style_text_color(menu_title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_title, &lv_font_montserrat_14, 0);
+    lv_obj_align(menu_title, LV_ALIGN_TOP_MID, 0, 10);
+    
+    // TCP 选项标签 (不是按钮，用标签显示)
+    menu_tcp_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_tcp_btn, "> TCP: OFF");
+    lv_obj_set_style_text_color(menu_tcp_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_tcp_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(60, 60, 60), 0);
+    lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_50, 0);
+    lv_obj_set_style_pad_all(menu_tcp_btn, 4, 0);
+    lv_obj_align(menu_tcp_btn, LV_ALIGN_TOP_MID, 0, 40);
+    
+    // DISPLAY 选项标签
+    menu_display_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_display_btn, "  DISPLAY: ON");
+    lv_obj_set_style_text_color(menu_display_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_display_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_display_btn, 4, 0);
+    lv_obj_align(menu_display_btn, LV_ALIGN_TOP_MID, 0, 70);
+    
+    // 初始化时间更新时间戳
+    gettimeofday(&last_time_update, NULL);
+    
+    // 立即更新时间显示
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    char time_str[16];
+    strftime(time_str, sizeof(time_str), "%H:%M", tm_info);
+    lv_label_set_text(time_label, time_str);
     
     printf("LVGL UI initialized (landscape mode: %dx%d)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
@@ -1491,7 +1473,7 @@ int main(int argc, char* argv[]) {
     printf("Controls:\n");
     printf("  KEY0 (PIN %d) - Toggle image display ON/OFF (camera keeps running)\n", KEY0_PIN);
     printf("  KEY1 (PIN %d) - Enable/Disable TCP transmission\n", KEY1_PIN);
-    printf("  KEY2 (PIN %d) - Wake screen / Update activity\n", KEY2_PIN);
+    printf("  KEY2 (PIN %d) - Show/Hide settings menu (TCP & DISPLAY controls)\n", KEY2_PIN);
     printf("  KEY3 (PIN %d) - Wake screen / Update activity\n", KEY3_PIN);
     printf("  Any key - Wake screen if auto-sleep activated\n");
     printf("  Ctrl+C - Exit\n");
@@ -1500,8 +1482,10 @@ int main(int argc, char* argv[]) {
     printf("  - Wake with any key press\n");
     printf("Function Independence:\n");
     printf("  - Camera: Always running (captures frames continuously)\n");
-    printf("  - Display: Controlled by KEY0 (ON/OFF)\n");
-    printf("  - TCP: Controlled by KEY1 (independent of display status)\n");
+    printf("  - Display: Controlled by KEY0 (ON/OFF) or Settings Menu\n");
+    printf("  - TCP: Controlled by KEY1 (independent of display status) or Settings Menu\n");
+    printf("  - Settings Menu: Controlled by KEY2 (virtual menu with TCP & DISPLAY options)\n");
+    printf("  - Time Display: Real-time clock in top-right corner (updates every minute)\n");
     printf("TCP Server: %s:%d (disabled by default)\n", DEFAULT_SERVER_IP, DEFAULT_PORT);
     
     // 主循环
@@ -1543,6 +1527,7 @@ int main(int argc, char* argv[]) {
         // 更新系统信息 (CPU和内存占用) - 只在屏幕开启时更新
         if (screen_on) {
             update_system_info();
+            update_time_display();  // 更新时间显示
         }
         
         // 动态休眠时间：降低CPU占用
@@ -1650,3 +1635,223 @@ cleanup:
     fflush(stdout);
     return 0;
 }
+
+/**
+ * @brief 更新时间显示 (每分钟更新一次)
+ */
+static void update_time_display(void) {
+    if (!time_label || !screen_on) return;
+    
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    
+    // 检查是否已过了一分钟
+    long time_diff = (current_time.tv_sec - last_time_update.tv_sec) * 1000000 +
+                     (current_time.tv_usec - last_time_update.tv_usec);
+    
+    if (time_diff >= 60000000) { // 60秒 = 60,000,000微秒
+        time_t now = time(NULL);
+        struct tm* tm_info = localtime(&now);
+        
+        char time_str[16];
+        strftime(time_str, sizeof(time_str), "%H:%M", tm_info);
+        
+        lv_label_set_text(time_label, time_str);
+        last_time_update = current_time;
+    }
+}
+
+/**
+ * @brief 显示设置菜单
+ */
+static void show_settings_menu(void) {
+    if (!menu_panel) return;
+    
+    menu_visible = 1;
+    menu_selected_item = 0; // 默认选择第一项 (TCP)
+    lv_obj_clear_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
+    
+    // 更新菜单内容并刷新选择状态
+    update_menu_selection();
+    
+    printf("Settings menu opened, selected item: %d\n", menu_selected_item);
+}
+
+/**
+ * @brief 隐藏设置菜单
+ */
+static void hide_settings_menu(void) {
+    if (!menu_panel) return;
+    
+    menu_visible = 0;
+    lv_obj_add_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
+    
+    printf("Settings menu closed\n");
+}
+
+/**
+ * @brief 更新菜单选择状态的视觉显示
+ */
+static void update_menu_selection(void) {
+    if (!menu_visible || !menu_tcp_btn || !menu_display_btn ) return;
+    
+    // 重置所有选项的背景
+    lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_30, 0);
+    // lv_obj_set_style_bg_color(menu_close_btn, lv_color_make(20, 20, 20), 0);
+    // lv_obj_set_style_bg_opa(menu_close_btn, LV_OPA_30, 0);
+    
+    // 更新文本内容
+    lv_label_set_text(menu_tcp_btn, "  TCP: ");
+    lv_label_set_text(menu_display_btn, "  DISPLAY: ");
+    
+    // 添加状态信息
+    char tcp_text[32];
+    char display_text[32];
+    snprintf(tcp_text, sizeof(tcp_text), "  TCP: %s", tcp_enabled ? "ON" : "OFF");
+    snprintf(display_text, sizeof(display_text), "  DISPLAY: %s", display_enabled ? "ON" : "OFF");
+    
+    lv_label_set_text(menu_tcp_btn, tcp_text);
+    lv_label_set_text(menu_display_btn, display_text);
+    
+    // 高亮当前选择的项目
+    switch (menu_selected_item) {
+        case 0: // TCP
+            lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(60, 60, 60), 0);
+            lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_70, 0);
+            snprintf(tcp_text, sizeof(tcp_text), "> TCP: %s", tcp_enabled ? "ON" : "OFF");
+            lv_label_set_text(menu_tcp_btn, tcp_text);
+            break;
+        case 1: // DISPLAY
+            lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(60, 60, 60), 0);
+            lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_70, 0);
+            snprintf(display_text, sizeof(display_text), "> DISPLAY: %s", display_enabled ? "ON" : "OFF");
+            lv_label_set_text(menu_display_btn, display_text);
+            break;
+    }
+}
+
+/**
+ * @brief 菜单向上导航
+ */
+static void menu_navigate_up(void) {
+    if (!menu_visible) return;
+    
+    menu_selected_item--;
+    if (menu_selected_item < 0) {
+        menu_selected_item = 1; // 循环到最后一项 
+    }
+    
+    update_menu_selection();
+    printf("Menu navigation UP, selected item: %d\n", menu_selected_item);
+}
+
+/**
+ * @brief 菜单向下导航
+ */
+static void menu_navigate_down(void) {
+    if (!menu_visible) return;
+    
+    menu_selected_item++;
+    if (menu_selected_item > 1) {
+        menu_selected_item = 0; // 循环到第一项 (TCP)
+    }
+    
+    update_menu_selection();
+    printf("Menu navigation DOWN, selected item: %d\n", menu_selected_item);
+}
+
+/**
+ * @brief 确认菜单选择
+ */
+static void menu_confirm_selection(void) {
+    if (!menu_visible) return;
+    
+    switch (menu_selected_item) {
+        case 0: // TCP 选项
+            tcp_enabled = !tcp_enabled;
+            printf("Menu: TCP transmission %s\n", tcp_enabled ? "ENABLED" : "DISABLED");
+            
+            if (tcp_enabled) {
+                // 启动TCP传输
+                if (server_fd < 0) {
+                    server_fd = create_server(DEFAULT_PORT);
+                    if (server_fd >= 0) {
+                        if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0) {
+                            printf("Menu: TCP server started successfully\n");
+                            // TCP状态标签显示已禁用
+                            // if (tcp_label) {
+                            //     lv_label_set_text(tcp_label, "TCP: ON");
+                            //     lv_obj_set_style_text_color(tcp_label, lv_color_make(0, 255, 255), 0);
+                            // }
+                        } else {
+                            printf("Menu: Failed to create TCP thread\n");
+                            close(server_fd);
+                            server_fd = -1;
+                            tcp_enabled = 0;
+                        }
+                    } else {
+                        printf("Menu: Failed to create TCP server\n");
+                        tcp_enabled = 0;
+                    }
+                }
+            } else {
+                // 停止TCP传输
+                printf("Menu: Stopping TCP transmission...\n");
+                
+                // 关闭客户端连接
+                if (client_connected) {
+                    shutdown(client_fd, SHUT_RDWR);
+                    close(client_fd);
+                    client_connected = 0;
+                    client_fd = -1;
+                }
+                
+                // 关闭服务器socket
+                if (server_fd >= 0) {
+                    shutdown(server_fd, SHUT_RDWR);
+                    close(server_fd);
+                    server_fd = -1;
+                }
+                
+            }
+            break;
+            
+        case 1: // DISPLAY 选项
+            display_enabled = !display_enabled;
+            printf("Menu: Display %s (camera continues running)\n", 
+                   display_enabled ? "ENABLED" : "DISABLED");
+            
+            // 状态标签显示已禁用
+            // if (status_label) {
+            //     lv_label_set_text(status_label, display_enabled ? "DISPLAY: ON" : "DISPLAY: OFF");
+            //     lv_obj_set_style_text_color(status_label, 
+            //                                display_enabled ? lv_color_make(0, 255, 0) : lv_color_make(255, 255, 0), 0);
+            // }
+            
+            // 控制图像显示
+            if (img_canvas) {
+                if (display_enabled) {
+                    lv_obj_clear_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
+            break;
+            
+        case 2: // CLOSE 选项
+            hide_settings_menu();
+            break;
+    }
+    
+    // 更新菜单显示 (除非是关闭菜单)
+    if (menu_visible) {
+        update_menu_selection();
+    }
+    
+    update_activity_time();
+}
+
+
