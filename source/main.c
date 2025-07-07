@@ -133,6 +133,18 @@ static void menu_tcp_event_cb(lv_event_t* e);
 static void menu_display_event_cb(lv_event_t* e);
 static void menu_close_event_cb(lv_event_t* e);
 
+// 相机控制相关函数
+static void menu_exposure_event_cb(lv_event_t* e);
+static void menu_gain_event_cb(lv_event_t* e);
+static void adjust_exposure_up(void);
+static void adjust_exposure_down(void);
+static void adjust_gain_up(void);
+static void adjust_gain_down(void);
+static int init_camera_controls(void);
+static void cleanup_camera_controls(void);
+static void update_exposure_value(int32_t new_value);
+static void update_gain_value(int32_t new_value);
+
 // 系统资源监控
 static float get_cpu_usage(void);
 static float get_memory_usage(void);
@@ -168,9 +180,20 @@ static volatile int display_enabled = 1;    // 图像显示开关状态 (KEY0控
 static volatile int tcp_enabled = 0;
 static volatile int screen_on = 1;          // 屏幕开关状态
 static volatile int menu_visible = 0;       // 设置菜单显示状态
-static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY, 2=CLOSE)
+static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY, 2=EXPOSURE, 3=GAIN, 4=CLOSE)
+static volatile int in_adjustment_mode = 0; // 是否在调整模式中
+static volatile int adjustment_type = 0;    // 调整类型 (0=exposure, 1=gain)
 static struct timeval last_activity_time;  // 最后活动时间
 static struct timeval last_time_update;    // 最后时间更新时间
+
+// 相机控制状态
+static int subdev_handle = -1;              // 子设备句柄
+static int32_t current_exposure = 128;     // 当前曝光值 (1-1352)
+static int32_t current_gain = 128;         // 当前增益值 (128-99614)
+static int32_t exposure_min = 1;           // 曝光最小值
+static int32_t exposure_max = 1352;        // 曝光最大值
+static int32_t gain_min = 128;             // 增益最小值
+static int32_t gain_max = 99614;           // 增益最大值
 
 // TCP 传输状态
 static volatile int client_connected = 0;
@@ -191,6 +214,8 @@ static lv_obj_t* time_label = NULL;  // 时间显示标签
 static lv_obj_t* menu_panel = NULL;  // 设置菜单面板
 static lv_obj_t* menu_tcp_btn = NULL;  // TCP 按钮
 static lv_obj_t* menu_display_btn = NULL;  // DISPLAY 按钮
+static lv_obj_t* menu_exposure_btn = NULL;  // EXPOSURE 按钮
+static lv_obj_t* menu_gain_btn = NULL;      // GAIN 按钮
 // static lv_obj_t* menu_close_btn = NULL;  // 关闭按钮
 
 // 帧率统计
@@ -205,6 +230,12 @@ static pthread_cond_t frame_ready = PTHREAD_COND_INITIALIZER;
 // 当前帧数据
 static media_frame_t current_frame = {0};
 static int frame_available = 0;
+
+// 曝光和增益控制
+static int32_t exposure_value = 0;  // 曝光值
+static int32_t gain_value = 0;      // 增益值
+static int exposure_step = 16;       // 曝光调整步长
+static int gain_step = 32;           // 增益调整步长
 
 // ============================================================================
 // 工具函数
@@ -1289,7 +1320,7 @@ static void init_lvgl_ui(void) {
     
     // 创建设置菜单面板 (初始隐藏) - 重新设计为导航式菜单
     menu_panel = lv_obj_create(scr);
-    lv_obj_set_size(menu_panel, 180, 140);
+    lv_obj_set_size(menu_panel, 200, 200);
     lv_obj_center(menu_panel);
     lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
@@ -1303,7 +1334,7 @@ static void init_lvgl_ui(void) {
     lv_label_set_text(menu_title, "Settings Menu");
     lv_obj_set_style_text_color(menu_title, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_title, &lv_font_montserrat_14, 0);
-    lv_obj_align(menu_title, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_align(menu_title, LV_ALIGN_TOP_MID, 0, 8);
     
     // TCP 选项标签 (不是按钮，用标签显示)
     menu_tcp_btn = lv_label_create(menu_panel);
@@ -1313,7 +1344,7 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(60, 60, 60), 0);
     lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_50, 0);
     lv_obj_set_style_pad_all(menu_tcp_btn, 4, 0);
-    lv_obj_align(menu_tcp_btn, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(menu_tcp_btn, LV_ALIGN_TOP_MID, 0, 35);
     
     // DISPLAY 选项标签
     menu_display_btn = lv_label_create(menu_panel);
@@ -1323,7 +1354,27 @@ static void init_lvgl_ui(void) {
     lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_display_btn, 4, 0);
-    lv_obj_align(menu_display_btn, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_align(menu_display_btn, LV_ALIGN_TOP_MID, 0, 60);
+    
+    // EXPOSURE 选项标签
+    menu_exposure_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_exposure_btn, "  EXPOSURE: 128");
+    lv_obj_set_style_text_color(menu_exposure_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_exposure_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_exposure_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_exposure_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_exposure_btn, 4, 0);
+    lv_obj_align(menu_exposure_btn, LV_ALIGN_TOP_MID, 0, 85);
+    
+    // GAIN 选项标签
+    menu_gain_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_gain_btn, "  GAIN: 128");
+    lv_obj_set_style_text_color(menu_gain_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_gain_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_gain_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_gain_btn, 4, 0);
+    lv_obj_align(menu_gain_btn, LV_ALIGN_TOP_MID, 0, 110);
     
     // 初始化时间更新时间戳
     gettimeofday(&last_time_update, NULL);
@@ -1447,6 +1498,9 @@ int main(int argc, char* argv[]) {
     // 初始化 LVGL 界面
     init_lvgl_ui();
     
+    // 初始化曝光和增益控制
+    init_camera_controls();
+    
     // 初始化帧率统计
     gettimeofday(&last_fps_time, NULL);
     
@@ -1475,7 +1529,6 @@ int main(int argc, char* argv[]) {
     printf("  KEY1 (PIN %d) - Enable/Disable TCP transmission\n", KEY1_PIN);
     printf("  KEY2 (PIN %d) - Show/Hide settings menu (TCP & DISPLAY controls)\n", KEY2_PIN);
     printf("  KEY3 (PIN %d) - Wake screen / Update activity\n", KEY3_PIN);
-    printf("  Any key - Wake screen if auto-sleep activated\n");
     printf("  Ctrl+C - Exit\n");
     printf("Screen Management:\n");
     printf("  - Auto-sleep after 5s when display is OFF\n");
@@ -1551,6 +1604,9 @@ int main(int argc, char* argv[]) {
         close(server_fd);
         server_fd = -1;
     }
+    
+    // 清理相机控制
+    cleanup_camera_controls();
     
     // 确保停止媒体会话，避免阻塞
     printf("Stopping media session...\n");
@@ -1693,28 +1749,33 @@ static void hide_settings_menu(void) {
  * @brief 更新菜单选择状态的视觉显示
  */
 static void update_menu_selection(void) {
-    if (!menu_visible || !menu_tcp_btn || !menu_display_btn ) return;
+    if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn) return;
     
     // 重置所有选项的背景
     lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_30, 0);
     lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_30, 0);
-    // lv_obj_set_style_bg_color(menu_close_btn, lv_color_make(20, 20, 20), 0);
-    // lv_obj_set_style_bg_opa(menu_close_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_exposure_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_exposure_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_gain_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_30, 0);
     
     // 更新文本内容
-    lv_label_set_text(menu_tcp_btn, "  TCP: ");
-    lv_label_set_text(menu_display_btn, "  DISPLAY: ");
-    
-    // 添加状态信息
     char tcp_text[32];
     char display_text[32];
+    char exposure_text[32];
+    char gain_text[32];
+    
     snprintf(tcp_text, sizeof(tcp_text), "  TCP: %s", tcp_enabled ? "ON" : "OFF");
     snprintf(display_text, sizeof(display_text), "  DISPLAY: %s", display_enabled ? "ON" : "OFF");
+    snprintf(exposure_text, sizeof(exposure_text), "  EXPOSURE: %d", current_exposure);
+    snprintf(gain_text, sizeof(gain_text), "  GAIN: %d", current_gain);
     
     lv_label_set_text(menu_tcp_btn, tcp_text);
     lv_label_set_text(menu_display_btn, display_text);
+    lv_label_set_text(menu_exposure_btn, exposure_text);
+    lv_label_set_text(menu_gain_btn, gain_text);
     
     // 高亮当前选择的项目
     switch (menu_selected_item) {
@@ -1730,6 +1791,26 @@ static void update_menu_selection(void) {
             snprintf(display_text, sizeof(display_text), "> DISPLAY: %s", display_enabled ? "ON" : "OFF");
             lv_label_set_text(menu_display_btn, display_text);
             break;
+        case 2: // EXPOSURE
+            lv_obj_set_style_bg_color(menu_exposure_btn, lv_color_make(60, 60, 60), 0);
+            lv_obj_set_style_bg_opa(menu_exposure_btn, LV_OPA_70, 0);
+            if (in_adjustment_mode && adjustment_type == 0) {
+                snprintf(exposure_text, sizeof(exposure_text), "> EXPOSURE: %d *", current_exposure);
+            } else {
+                snprintf(exposure_text, sizeof(exposure_text), "> EXPOSURE: %d", current_exposure);
+            }
+            lv_label_set_text(menu_exposure_btn, exposure_text);
+            break;
+        case 3: // GAIN
+            lv_obj_set_style_bg_color(menu_gain_btn, lv_color_make(60, 60, 60), 0);
+            lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_70, 0);
+            if (in_adjustment_mode && adjustment_type == 1) {
+                snprintf(gain_text, sizeof(gain_text), "> GAIN: %d *", current_gain);
+            } else {
+                snprintf(gain_text, sizeof(gain_text), "> GAIN: %d", current_gain);
+            }
+            lv_label_set_text(menu_gain_btn, gain_text);
+            break;
     }
 }
 
@@ -1739,13 +1820,22 @@ static void update_menu_selection(void) {
 static void menu_navigate_up(void) {
     if (!menu_visible) return;
     
-    menu_selected_item--;
-    if (menu_selected_item < 0) {
-        menu_selected_item = 1; // 循环到最后一项 
+    if (in_adjustment_mode) {
+        // 在调整模式中，向上增加数值
+        if (adjustment_type == 0) {
+            adjust_exposure_up();
+        } else if (adjustment_type == 1) {
+            adjust_gain_up();
+        }
+    } else {
+        // 普通导航模式
+        menu_selected_item--;
+        if (menu_selected_item < 0) {
+            menu_selected_item = 3; // 循环到最后一项 (GAIN)
+        }
+        update_menu_selection();
+        printf("Menu navigation UP, selected item: %d\n", menu_selected_item);
     }
-    
-    update_menu_selection();
-    printf("Menu navigation UP, selected item: %d\n", menu_selected_item);
 }
 
 /**
@@ -1754,13 +1844,22 @@ static void menu_navigate_up(void) {
 static void menu_navigate_down(void) {
     if (!menu_visible) return;
     
-    menu_selected_item++;
-    if (menu_selected_item > 1) {
-        menu_selected_item = 0; // 循环到第一项 (TCP)
+    if (in_adjustment_mode) {
+        // 在调整模式中，向下减少数值
+        if (adjustment_type == 0) {
+            adjust_exposure_down();
+        } else if (adjustment_type == 1) {
+            adjust_gain_down();
+        }
+    } else {
+        // 普通导航模式
+        menu_selected_item++;
+        if (menu_selected_item > 3) {
+            menu_selected_item = 0; // 循环到第一项 (TCP)
+        }
+        update_menu_selection();
+        printf("Menu navigation DOWN, selected item: %d\n", menu_selected_item);
     }
-    
-    update_menu_selection();
-    printf("Menu navigation DOWN, selected item: %d\n", menu_selected_item);
 }
 
 /**
@@ -1781,11 +1880,6 @@ static void menu_confirm_selection(void) {
                     if (server_fd >= 0) {
                         if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0) {
                             printf("Menu: TCP server started successfully\n");
-                            // TCP状态标签显示已禁用
-                            // if (tcp_label) {
-                            //     lv_label_set_text(tcp_label, "TCP: ON");
-                            //     lv_obj_set_style_text_color(tcp_label, lv_color_make(0, 255, 255), 0);
-                            // }
                         } else {
                             printf("Menu: Failed to create TCP thread\n");
                             close(server_fd);
@@ -1815,7 +1909,6 @@ static void menu_confirm_selection(void) {
                     close(server_fd);
                     server_fd = -1;
                 }
-                
             }
             break;
             
@@ -1823,13 +1916,6 @@ static void menu_confirm_selection(void) {
             display_enabled = !display_enabled;
             printf("Menu: Display %s (camera continues running)\n", 
                    display_enabled ? "ENABLED" : "DISABLED");
-            
-            // 状态标签显示已禁用
-            // if (status_label) {
-            //     lv_label_set_text(status_label, display_enabled ? "DISPLAY: ON" : "DISPLAY: OFF");
-            //     lv_obj_set_style_text_color(status_label, 
-            //                                display_enabled ? lv_color_make(0, 255, 0) : lv_color_make(255, 255, 0), 0);
-            // }
             
             // 控制图像显示
             if (img_canvas) {
@@ -1841,17 +1927,228 @@ static void menu_confirm_selection(void) {
             }
             break;
             
-        case 2: // CLOSE 选项
-            hide_settings_menu();
+        case 2: // EXPOSURE 选项
+            if (in_adjustment_mode && adjustment_type == 0) {
+                // 退出调整模式
+                in_adjustment_mode = 0;
+                printf("Menu: Exiting exposure adjustment mode\n");
+            } else {
+                // 进入调整模式
+                in_adjustment_mode = 1;
+                adjustment_type = 0; // 曝光调整
+                printf("Menu: Entering exposure adjustment mode (UP/DOWN to adjust, KEY3 to exit)\n");
+            }
+            break;
+            
+        case 3: // GAIN 选项
+            if (in_adjustment_mode && adjustment_type == 1) {
+                // 退出调整模式
+                in_adjustment_mode = 0;
+                printf("Menu: Exiting gain adjustment mode\n");
+            } else {
+                // 进入调整模式
+                in_adjustment_mode = 1;
+                adjustment_type = 1; // 增益调整
+                printf("Menu: Entering gain adjustment mode (UP/DOWN to adjust, KEY3 to exit)\n");
+            }
             break;
     }
     
-    // 更新菜单显示 (除非是关闭菜单)
+    // 更新菜单显示
     if (menu_visible) {
         update_menu_selection();
     }
     
     update_activity_time();
+}
+
+/**
+ * @brief 相机曝光设置菜单事件回调
+ */
+static void menu_exposure_event_cb(lv_event_t* e) {
+    if (menu_visible && menu_selected_item == 0) {
+        // 暂时禁用曝光调节，避免与其他操作冲突
+        printf("Exposure adjustment temporarily disabled in menu\n");
+        return;
+    }
+    
+    // 曝光调节逻辑
+    if (e->code == LV_EVENT_VALUE_CHANGED) {
+        lv_obj_t* slider = e->target;
+        int32_t new_value = lv_slider_get_value(slider);
+        update_exposure_value(new_value);
+    }
+}
+
+/**
+ * @brief 相机增益设置菜单事件回调
+ */
+static void menu_gain_event_cb(lv_event_t* e) {
+    if (menu_visible && menu_selected_item == 0) {
+        // 暂时禁用增益调节，避免与其他操作冲突
+        printf("Gain adjustment temporarily disabled in menu\n");
+        return;
+    }
+    
+    // 增益调节逻辑
+    if (e->code == LV_EVENT_VALUE_CHANGED) {
+        lv_obj_t* slider = e->target;
+        int32_t new_value = lv_slider_get_value(slider);
+        update_gain_value(new_value);
+    }
+}
+
+/**
+ * @brief 调高曝光值
+ */
+static void adjust_exposure_up(void) {
+    int32_t new_value = current_exposure + exposure_step;
+    if (new_value > exposure_max) new_value = exposure_max;
+    exposure_value = new_value;
+    
+    update_exposure_value(new_value);
+    printf("Exposure increased to: %d\n", current_exposure);
+}
+
+/**
+ * @brief 调低曝光值
+ */
+static void adjust_exposure_down(void) {
+    int32_t new_value = current_exposure - exposure_step;
+    if (new_value < exposure_min) new_value = exposure_min;
+    exposure_value = new_value;
+    
+    update_exposure_value(new_value);
+    printf("Exposure decreased to: %d\n", current_exposure);
+}
+
+/**
+ * @brief 调高增益值
+ */
+static void adjust_gain_up(void) {
+    int32_t new_value = current_gain + gain_step;
+    if (new_value > gain_max) new_value = gain_max;
+    gain_value = new_value;
+    
+    update_gain_value(new_value);
+    printf("Gain increased to: %d\n", current_gain);
+}
+
+/**
+ * @brief 调低增益值
+ */
+static void adjust_gain_down(void) {
+    int32_t new_value = current_gain - gain_step;
+    if (new_value < gain_min) new_value = gain_min;
+    gain_value = new_value;
+    
+    update_gain_value(new_value);
+    printf("Gain decreased to: %d\n", current_gain);
+}
+
+/**
+ * @brief 更新曝光值并应用到相机
+ */
+static void update_exposure_value(int32_t new_value) {
+    if (subdev_handle < 0) {
+        printf("Warning: Camera controls not initialized, cannot set exposure\n");
+        return;
+    }
+    
+    // 限制范围
+    if (new_value < exposure_min) new_value = exposure_min;
+    if (new_value > exposure_max) new_value = exposure_max;
+    
+    // 设置到硬件
+    if (libmedia_set_exposure(subdev_handle, new_value) == 0) {
+        current_exposure = new_value;
+        printf("Exposure set to: %d\n", current_exposure);
+        
+        // 更新菜单显示
+        if (menu_visible) {
+            update_menu_selection();
+        }
+    } else {
+        printf("Error: Failed to set exposure to %d\n", new_value);
+    }
+}
+
+/**
+ * @brief 更新增益值并应用到相机
+ */
+static void update_gain_value(int32_t new_value) {
+    if (subdev_handle < 0) {
+        printf("Warning: Camera controls not initialized, cannot set gain\n");
+        return;
+    }
+    
+    // 限制范围
+    if (new_value < gain_min) new_value = gain_min;
+    if (new_value > gain_max) new_value = gain_max;
+    
+    // 设置到硬件
+    if (libmedia_set_gain(subdev_handle, new_value) == 0) {
+        current_gain = new_value;
+        printf("Gain set to: %d\n", current_gain);
+        
+        // 更新菜单显示
+        if (menu_visible) {
+            update_menu_selection();
+        }
+    } else {
+        printf("Error: Failed to set gain to %d\n", new_value);
+    }
+}
+
+/**
+ * @brief 初始化相机控制
+ */
+static int init_camera_controls(void) {
+    // 打开子设备用于控制
+    subdev_handle = libmedia_open_subdev("/dev/v4l-subdev2");
+    if (subdev_handle < 0) {
+        printf("Warning: Failed to open camera control subdevice, controls will not work\n");
+        return -1;
+    }
+    
+    // 获取当前曝光和增益值
+    media_control_info_t info;
+    
+    // 获取曝光信息
+    if (libmedia_get_control_info(subdev_handle, MEDIA_CTRL_EXPOSURE, &info) == 0) {
+        exposure_min = info.min;
+        exposure_max = info.max;
+        current_exposure = info.current_value;
+        printf("Camera control: Exposure range: %d-%d, current: %d\n", 
+               exposure_min, exposure_max, current_exposure);
+    } else {
+        printf("Warning: Failed to get exposure control info\n");
+    }
+    
+    // 获取增益信息
+    if (libmedia_get_control_info(subdev_handle, MEDIA_CTRL_ANALOGUE_GAIN, &info) == 0) {
+        gain_min = info.min;
+        gain_max = info.max;
+        current_gain = info.current_value;
+        printf("Camera control: Gain range: %d-%d, current: %d\n", 
+               gain_min, gain_max, current_gain);
+    } else {
+        printf("Warning: Failed to get gain control info\n");
+    }
+    
+    printf("Camera controls initialized successfully\n");
+    return 0;
+}
+
+/**
+ * @brief 清理相机控制
+ */
+static void cleanup_camera_controls(void) {
+    if (subdev_handle >= 0) {
+        libmedia_close_subdev(subdev_handle);
+        subdev_handle = -1;
+        printf("Camera controls cleaned up\n");
+    }
 }
 
 
