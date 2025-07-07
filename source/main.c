@@ -1566,6 +1566,14 @@ int main(int argc, char* argv[]) {
     // 初始化曝光和增益控制
     init_camera_controls();
     
+    // 如果配置文件已加载，应用曝光和增益值到硬件
+    if (config_loaded) {
+        printf("Applying loaded configuration to camera hardware...\n");
+        update_exposure_value(current_config.exposure);
+        update_gain_value(current_config.gain);
+        printf("Configuration applied to camera hardware\n");
+    }
+    
     // 初始化帧率统计
     gettimeofday(&last_fps_time, NULL);
     
