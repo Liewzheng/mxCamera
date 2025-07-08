@@ -47,10 +47,52 @@ if (Test-Path "bin/mxCamera") {
 # 部署动态库文件
 Write-Host "部署动态库文件..." -ForegroundColor Yellow
 if (Test-Path "lib") {
+    # 首先部署所有库文件
     $libFiles = Get-ChildItem "lib" -Filter "*.so*"
     foreach ($libFile in $libFiles) {
         adb push $libFile.FullName "/usr/lib/$($libFile.Name)"
         Write-Host "部署库文件: $($libFile.Name)" -ForegroundColor Green
+    }
+    
+    # 创建软符号连接
+    Write-Host "创建软符号连接..." -ForegroundColor Yellow
+    
+    # 自动识别版本化的库文件并创建软链接
+    $versionedLibs = Get-ChildItem "lib" -Filter "*.so.*.*.*" | Where-Object { $_.Name -match '\.so\.\d+\.\d+\.\d+$' }
+    
+    foreach ($versionedLib in $versionedLibs) {
+        $realLibName = $versionedLib.Name
+        $libPath = "/usr/lib/$realLibName"
+        
+        # 检查实际库文件是否存在
+        $checkResult = adb shell "[ -f $libPath ] && echo 'exists' || echo 'not_found'"
+        if ($checkResult.Trim() -eq "exists") {
+            # 解析库名和版本号
+            if ($realLibName -match '^(.+)\.so\.(\d+)\.(\d+)\.(\d+)$') {
+                $baseName = $matches[1]
+                $majorVersion = $matches[2]
+                $minorVersion = $matches[3]
+                $patchVersion = $matches[4]
+                
+                # 创建软链接: libname.so.major -> libname.so.major.minor.patch
+                $majorLink = "$baseName.so.$majorVersion"
+                $majorLinkPath = "/usr/lib/$majorLink"
+                adb shell "rm -f $majorLinkPath"
+                adb shell "ln -s $realLibName $majorLinkPath"
+                Write-Host "创建软链接: $majorLink -> $realLibName" -ForegroundColor Green
+                
+                # 创建软链接: libname.so -> libname.so.major.minor.patch
+                $baseLink = "$baseName.so"
+                $baseLinkPath = "/usr/lib/$baseLink"
+                adb shell "rm -f $baseLinkPath"
+                adb shell "ln -s $realLibName $baseLinkPath"
+                Write-Host "创建软链接: $baseLink -> $realLibName" -ForegroundColor Green
+            } else {
+                Write-Warning "无法解析库文件版本号: $realLibName"
+            }
+        } else {
+            Write-Warning "库文件 $realLibName 不存在，跳过软链接创建"
+        }
     }
 } else {
     Write-Warning "lib 目录不存在，跳过库文件部署"
