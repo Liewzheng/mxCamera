@@ -48,20 +48,7 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 
-/**
- * @struct frame_header
- * @brief 数据帧头部结构
- */
-struct frame_header {
-    uint32_t magic;       /**< 魔数标识：0xDEADBEEF */
-    uint32_t frame_id;    /**< 帧序号 */
-    uint32_t width;       /**< 图像宽度 */
-    uint32_t height;      /**< 图像高度 */
-    uint32_t pixfmt;      /**< 像素格式 */
-    uint32_t size;        /**< 数据大小 */
-    uint64_t timestamp;   /**< 时间戳 */
-    uint32_t reserved[2]; /**< 保留字段 */
-} __attribute__((packed));
+#include "mxCamera.h"
 
 // ============================================================================
 // 系统配置常量
@@ -104,104 +91,7 @@ static int current_img_height = 240;
 #define CONFIG_MAX_KEY_LENGTH 64
 #define CONFIG_MAX_VALUE_LENGTH 128
 
-/**
- * @struct mxcamera_config
- * @brief mxCamera 配置结构体
- */
-typedef struct {
-    int32_t exposure;        // 曝光值
-    int32_t gain;           // 增益值
-    int exposure_step;      // 曝光调整步长
-    int gain_step;          // 增益调整步长
-    int camera_width;       // 摄像头宽度
-    int camera_height;      // 摄像头高度
-} mxcamera_config_t;
 
-// ============================================================================
-// 函数声明
-// ============================================================================
-
-// 信号处理和系统配置
-static void signal_handler(int sig);
-static void check_display_config(void);
-static void print_usage(const char* program_name);
-static int parse_arguments(int argc, char* argv[]);
-
-// 图像处理和缩放
-static void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height);
-static void unpack_sbggr10_scalar(const uint8_t raw_bytes[5], uint16_t pixels[4]);
-static int unpack_sbggr10_image(const uint8_t *raw_data, size_t raw_size, 
-                               uint16_t *output_pixels, int width, int height);
-static void scale_pixels(const uint16_t* src_pixels, int src_width, int src_height,
-                        uint16_t* dst_pixels, int dst_width, int dst_height);
-static void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_data,
-                                    int width, int height);
-static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
-                              uint16_t* dst_buffer);
-
-// 显示和UI更新
-static void update_fps(void);
-static void update_image_display(void);
-static void init_lvgl_ui(void);
-static void update_time_display(void);
-static void show_settings_menu(void);
-static void hide_settings_menu(void);
-static void update_menu_selection(void);
-static void menu_navigate_up(void);
-static void menu_navigate_down(void);
-static void menu_confirm_selection(void);
-static void menu_tcp_event_cb(lv_event_t* e);
-static void menu_display_event_cb(lv_event_t* e);
-static void menu_close_event_cb(lv_event_t* e);
-
-// 相机控制相关函数
-static void menu_exposure_event_cb(lv_event_t* e);
-static void menu_gain_event_cb(lv_event_t* e);
-static void adjust_exposure_up(void);
-static void adjust_exposure_down(void);
-static void adjust_gain_up(void);
-static void adjust_gain_down(void);
-static int init_camera_controls(void);
-static void cleanup_camera_controls(void);
-static void update_exposure_value(int32_t new_value);
-static void update_gain_value(int32_t new_value);
-
-// 配置文件管理
-static int load_config_file(mxcamera_config_t* config);
-static int save_config_file(const mxcamera_config_t* config);
-static void apply_config(const mxcamera_config_t* config);
-static void init_default_config(mxcamera_config_t* config);
-static char* trim_whitespace(char* str);
-static int parse_config_line(const char* line, char* key, char* value);
-
-// 拍照功能
-static int capture_raw_photo(void);
-static int create_images_directory(void);
-static char* generate_photo_filename(void);
-
-// 系统资源监控
-static float get_cpu_usage(void);
-static float get_memory_usage(void);
-static void update_system_info(void);
-
-// 线程和输入处理
-static void* camera_thread(void* arg);
-static void handle_keys(void);
-
-// 屏幕控制
-static void turn_screen_off(void);
-static void turn_screen_on(void);
-static void check_screen_timeout(void);
-static void update_activity_time(void);
-
-// 资源清理
-static void cleanup_image_buffers(void);
-
-// TCP 传输相关函数
-static uint64_t get_time_ns(void);
-static int create_server(int port);
-static int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64_t timestamp);
-static void* tcp_sender_thread(void* arg);
 
 // ============================================================================
 // 全局变量
@@ -286,7 +176,7 @@ static int config_loaded = 0;             // 配置是否已加载
 /**
  * @brief 信号处理函数
  */
-static void signal_handler(int sig) {
+void signal_handler(int sig) {
     printf("\nReceived signal %d, cleaning up...\n", sig);
     exit_flag = 1;
     tcp_enabled = 0; // 停止TCP传输
@@ -334,7 +224,7 @@ static void signal_handler(int sig) {
 /**
  * @brief 打印程序使用方法
  */
-static void print_usage(const char* program_name) {
+void print_usage(const char* program_name) {
     printf("Usage: %s [OPTIONS]\n", program_name);
     printf("\nOptions:\n");
     printf("  --width WIDTH      Set camera width (default: %d)\n", DEFAULT_CAMERA_WIDTH);
@@ -364,7 +254,7 @@ static void print_usage(const char* program_name) {
  * @param argv 参数数组
  * @return 0 成功，-1 失败，1 显示帮助后退出
  */
-static int parse_arguments(int argc, char* argv[]) {
+int parse_arguments(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--width") == 0) {
             if (i + 1 >= argc) {
@@ -425,7 +315,7 @@ static int parse_arguments(int argc, char* argv[]) {
 /**
  * @brief 检查和配置显示设备
  */
-static void check_display_config(void) {
+void check_display_config(void) {
     printf("=== Display Configuration Check ===\n");
     
     // 检查帧缓冲设备
@@ -446,7 +336,7 @@ static void check_display_config(void) {
 /**
  * @brief 获取高精度时间戳
  */
-static uint64_t get_time_ns(void) {
+uint64_t get_time_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
@@ -455,7 +345,7 @@ static uint64_t get_time_ns(void) {
 /**
  * @brief 创建TCP服务器
  */
-static int create_server(int port) {
+int create_server(int port) {
     int fd;
     struct sockaddr_in addr;
     int opt = 1;
@@ -503,7 +393,7 @@ static int create_server(int port) {
 /**
  * @brief 发送图像帧数据到客户端
  */
-static int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64_t timestamp) {
+int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64_t timestamp) {
     struct frame_header header = {
         .magic = 0xDEADBEEF,
         .frame_id = frame_id,
@@ -541,7 +431,7 @@ static int send_frame(int fd, void* data, size_t size, uint32_t frame_id, uint64
 /**
  * @brief TCP数据发送线程函数
  */
-static void* tcp_sender_thread(void* arg) {
+void* tcp_sender_thread(void* arg) {
     (void)arg; // 避免未使用参数警告
     printf("TCP sender thread started\n");
     static uint32_t tcp_frame_counter = 0;
@@ -633,7 +523,7 @@ static void* tcp_sender_thread(void* arg) {
 /**
  * @brief 清理动态分配的图像缓冲区
  */
-static void cleanup_image_buffers(void) {
+void cleanup_image_buffers(void) {
     // 这个函数会在 update_image_display 中通过静态变量引用
     // 实际的清理在程序退出时自动发生
     printf("Image buffers cleanup initiated\n");
@@ -642,14 +532,14 @@ static void cleanup_image_buffers(void) {
 /**
  * @brief 更新最后活动时间
  */
-static void update_activity_time(void) {
+void update_activity_time(void) {
     gettimeofday(&last_activity_time, NULL);
 }
 
 /**
  * @brief 关闭屏幕
  */
-static void turn_screen_off(void) {
+void turn_screen_off(void) {
     if (!screen_on) return;
     
     printf("Turning screen OFF (auto-sleep after 5s pause)\n");
@@ -675,7 +565,7 @@ static void turn_screen_off(void) {
 /**
  * @brief 打开屏幕
  */
-static void turn_screen_on(void) {
+void turn_screen_on(void) {
     if (screen_on) return;
     
     printf("Turning screen ON (key wake-up)\n");
@@ -697,7 +587,7 @@ static void turn_screen_on(void) {
 /**
  * @brief 检查屏幕超时并自动关闭
  */
-static void check_screen_timeout(void) {
+void check_screen_timeout(void) {
     if (!screen_on || display_enabled) return; // 只在屏幕开启且显示关闭时检查超时
     
     struct timeval current_time;
@@ -719,7 +609,7 @@ static void check_screen_timeout(void) {
  * @param dst_width 输出缩放后宽度
  * @param dst_height 输出缩放后高度
  */
-static void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height) {
+void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* dst_height) {
     if (src_width <= 0 || src_height <= 0) {
         *dst_width = DISPLAY_WIDTH;
         *dst_height = DISPLAY_HEIGHT;
@@ -743,14 +633,14 @@ static void calculate_scaled_size(int src_width, int src_height, int* dst_width,
     if (*dst_width < 160) *dst_width = 160;
     if (*dst_height < 120) *dst_height = 120;
     
-    printf("Image scaling: %dx%d -> %dx%d (aspect ratio: %.3f)\n", 
-           src_width, src_height, *dst_width, *dst_height, (double)aspect_ratio);
+    // printf("Image scaling: %dx%d -> %dx%d (aspect ratio: %.3f)\n", 
+    //        src_width, src_height, *dst_width, *dst_height, (double)aspect_ratio);
 }
 
 /**
  * @brief 计算帧率
  */
-static void update_fps(void) {
+void update_fps(void) {
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
     
@@ -770,7 +660,7 @@ static void update_fps(void) {
  * @brief 获取CPU使用率
  * @return CPU使用率百分比 (0.0-100.0)
  */
-static float get_cpu_usage(void) {
+float get_cpu_usage(void) {
     static unsigned long long last_total = 0, last_idle = 0;
     unsigned long long total, idle, user, nice, system, iowait, irq, softirq, steal;
     
@@ -813,7 +703,7 @@ static float get_cpu_usage(void) {
  * @brief 获取内存使用率
  * @return 内存使用率百分比 (0.0-100.0)
  */
-static float get_memory_usage(void) {
+float get_memory_usage(void) {
     FILE *fp = fopen("/proc/meminfo", "r");
     if (!fp) {
         return -1.0f;
@@ -841,7 +731,7 @@ static float get_memory_usage(void) {
 /**
  * @brief 更新系统信息显示（合并图像大小、帧率、CPU和内存占用）
  */
-static void update_system_info(void) {
+void update_system_info(void) {
     if (!info_label) return;
     
     static struct timeval last_update = {0};
@@ -875,7 +765,7 @@ static void update_system_info(void) {
  * @param raw_bytes 5字节的RAW10数据（包含4个像素）
  * @param pixels 输出的4个16位像素值
  */
-static void unpack_sbggr10_scalar(const uint8_t raw_bytes[5], uint16_t pixels[4]) {
+void unpack_sbggr10_scalar(const uint8_t raw_bytes[5], uint16_t pixels[4]) {
     // 重构40位数据
     uint64_t combined = ((uint64_t)raw_bytes[4] << 32) |
                        ((uint64_t)raw_bytes[3] << 24) |
@@ -899,7 +789,7 @@ static void unpack_sbggr10_scalar(const uint8_t raw_bytes[5], uint16_t pixels[4]
  * @param height 图像高度
  * @return 0成功，-1失败
  */
-static int unpack_sbggr10_image(const uint8_t *raw_data, size_t raw_size, 
+int unpack_sbggr10_image(const uint8_t *raw_data, size_t raw_size, 
                                uint16_t *output_pixels, int width, int height) {
     if (!raw_data || !output_pixels || raw_size == 0) {
         return -1;
@@ -953,7 +843,7 @@ static int unpack_sbggr10_image(const uint8_t *raw_data, size_t raw_size,
  * @param dst_width 目标图像宽度
  * @param dst_height 目标图像高度
  */
-static void scale_pixels(const uint16_t* src_pixels, int src_width, int src_height,
+void scale_pixels(const uint16_t* src_pixels, int src_width, int src_height,
                         uint16_t* dst_pixels, int dst_width, int dst_height) {
     float x_ratio = (float)src_width / dst_width;
     float y_ratio = (float)src_height / dst_height;
@@ -982,7 +872,7 @@ static void scale_pixels(const uint16_t* src_pixels, int src_width, int src_heig
  * @param width 图像宽度
  * @param height 图像高度
  */
-static void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_data,
+void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_data,
                                     int width, int height) {
     int total_pixels = width * height;
     
@@ -1004,7 +894,7 @@ static void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_da
  * @param dst_buffer 目标全屏缓冲区 (320x240)
  * @return 0 成功，-1 失败
  */
-static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
+int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
                        uint16_t* dst_buffer) {
     if (!src_buffer || !dst_buffer || src_width <= 0 || src_height <= 0) {
         return -1;
@@ -1046,7 +936,7 @@ static int landscape_image_fit(const uint16_t* src_buffer, int src_width, int sr
 /**
  * @brief 更新图像显示 (使用正确的SBGGR10解包和缩放，优化性能)
  */
-static void update_image_display(void) {
+void update_image_display(void) {
     // 使用非阻塞锁尝试，避免阻塞按键处理
     if (pthread_mutex_trylock(&frame_mutex) != 0) {
         return; // 如果无法获取锁，跳过本次更新
@@ -1149,7 +1039,7 @@ static void update_image_display(void) {
 /**
  * @brief 摄像头采集线程函数 (始终运行，不受显示状态影响)
  */
-static void* camera_thread(void* arg) {
+void* camera_thread(void* arg) {
     printf("Camera thread started (always running)\n");
     
     while (!exit_flag) {
@@ -1200,7 +1090,7 @@ static void* camera_thread(void* arg) {
 /**
  * @brief 处理按键输入 (新设计：KEY1=上，KEY0=下，KEY3=确认，KEY2=设置菜单)
  */
-static void handle_keys(void) {
+void handle_keys(void) {
     static int last_key0_state = 1;
     static int last_key1_state = 1;
     static int last_key2_state = 1;
@@ -1338,7 +1228,7 @@ static void handle_keys(void) {
 /**
  * @brief 初始化 LVGL 界面
  */
-static void init_lvgl_ui(void) {
+void init_lvgl_ui(void) {
     // 获取当前屏幕
     lv_obj_t* scr = lv_disp_get_scr_act(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
@@ -1433,13 +1323,6 @@ static void init_lvgl_ui(void) {
     // 初始化时间更新时间戳
     gettimeofday(&last_time_update, NULL);
     
-    // 立即更新时间显示
-    time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    char time_str[16];
-    strftime(time_str, sizeof(time_str), "%H:%M", tm_info);
-    lv_label_set_text(time_label, time_str);
-    
     printf("LVGL UI initialized (landscape mode: %dx%d)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
 }
 
@@ -1522,6 +1405,13 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     
+    // 初始化 INA219 电池监测 (可选，失败不影响主要功能)
+    if (init_ina219() == 0) {
+        printf("INA219 battery monitoring initialized\n");
+    } else {
+        printf("Warning: INA219 initialization failed, battery monitoring disabled\n");
+    }
+    
     // 初始化 libMedia
     if (libmedia_init() != 0) {
         printf("Failed to initialize libMedia\n");
@@ -1562,6 +1452,9 @@ int main(int argc, char* argv[]) {
     
     // 初始化 LVGL 界面
     init_lvgl_ui();
+    
+    // 立即更新时间和电池显示
+    update_time_display();
     
     // 初始化曝光和增益控制
     init_camera_controls();
@@ -1758,6 +1651,9 @@ cleanup:
         lcd_initialized = 0;
     }
 
+    // 清理 INA219 电池监测
+    cleanup_ina219();
+
     // 清理 GPIO
     printf("Cleaning up GPIO...\n");
     DEV_ModuleExit();
@@ -1773,34 +1669,65 @@ cleanup:
 }
 
 /**
- * @brief 更新时间显示 (每分钟更新一次)
+ * @brief 更新时间和电池显示 (时间每分钟更新，电池每10秒更新)
  */
-static void update_time_display(void) {
+void update_time_display(void) {
     if (!time_label || !screen_on) return;
     
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
     
-    // 检查是否已过了一分钟
+    // 检查时间显示是否需要更新（每分钟）
     long time_diff = (current_time.tv_sec - last_time_update.tv_sec) * 1000000 +
                      (current_time.tv_usec - last_time_update.tv_usec);
     
-    if (time_diff >= 60000000) { // 60秒 = 60,000,000微秒
-        time_t now = time(NULL);
-        struct tm* tm_info = localtime(&now);
+    static struct timeval last_battery_update = {0, 0};
+    long battery_time_diff = (current_time.tv_sec - last_battery_update.tv_sec) * 1000000 +
+                            (current_time.tv_usec - last_battery_update.tv_usec);
+    
+    // 获取当前时间字符串
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    char time_str[32];
+    strftime(time_str, 16, "%H:%M", tm_info);
+    
+    // 初始化或更新电池状态（每10秒更新一次）
+    static float last_battery_percentage = -1.0f;
+    if (battery_time_diff >= 10000000 || last_battery_percentage < 0) { // 10秒
+        if (is_ina219_initialized()) {
+            update_battery_status();
+            last_battery_percentage = get_battery_percentage();
+            last_battery_update = current_time;
+            
+            printf("Battery status updated: %.1f%%\n", (double)last_battery_percentage);
+        } else {
+            printf("Cannot access battery percentage - INA219 not initialized\n");
+            last_battery_percentage = -1.0f;
+        }
+    }
+    
+    // 更新显示内容（增加缓冲区大小以避免截断警告）
+    char display_str[64];
+    if (last_battery_percentage >= 0) {
+        snprintf(display_str, sizeof(display_str), "%s %.0f%%", time_str, (double)last_battery_percentage);
+    } else {
+        snprintf(display_str, sizeof(display_str), "%s N/A", time_str);
+    }
+    
+    // 更新显示（时间每分钟更新，但电池状态变化时也更新）
+    if (time_diff >= 60000000 || battery_time_diff >= 10000000) { // 时间更新或电池状态更新
+        lv_label_set_text(time_label, display_str);
         
-        char time_str[16];
-        strftime(time_str, sizeof(time_str), "%H:%M", tm_info);
-        
-        lv_label_set_text(time_label, time_str);
-        last_time_update = current_time;
+        if (time_diff >= 60000000) {
+            last_time_update = current_time;
+        }
     }
 }
 
 /**
  * @brief 显示设置菜单
  */
-static void show_settings_menu(void) {
+void show_settings_menu(void) {
     if (!menu_panel) return;
     
     menu_visible = 1;
@@ -1816,7 +1743,7 @@ static void show_settings_menu(void) {
 /**
  * @brief 隐藏设置菜单
  */
-static void hide_settings_menu(void) {
+void hide_settings_menu(void) {
     if (!menu_panel) return;
     
     menu_visible = 0;
@@ -1828,7 +1755,7 @@ static void hide_settings_menu(void) {
 /**
  * @brief 更新菜单选择状态的视觉显示
  */
-static void update_menu_selection(void) {
+void update_menu_selection(void) {
     if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn) return;
     
     // 重置所有选项的背景
@@ -1899,7 +1826,7 @@ static void update_menu_selection(void) {
 /**
  * @brief 菜单向上导航
  */
-static void menu_navigate_up(void) {
+void menu_navigate_up(void) {
     if (!menu_visible) return;
     
     if (in_adjustment_mode) {
@@ -1923,7 +1850,7 @@ static void menu_navigate_up(void) {
 /**
  * @brief 菜单向下导航
  */
-static void menu_navigate_down(void) {
+void menu_navigate_down(void) {
     if (!menu_visible) return;
     
     if (in_adjustment_mode) {
@@ -1947,7 +1874,7 @@ static void menu_navigate_down(void) {
 /**
  * @brief 确认菜单选择
  */
-static void menu_confirm_selection(void) {
+void menu_confirm_selection(void) {
     if (!menu_visible) return;
     
     switch (menu_selected_item) {
@@ -2065,7 +1992,7 @@ static void menu_confirm_selection(void) {
 /**
  * @brief 相机曝光设置菜单事件回调
  */
-static void menu_exposure_event_cb(lv_event_t* e) {
+void menu_exposure_event_cb(lv_event_t* e) {
     if (menu_visible && menu_selected_item == 0) {
         // 暂时禁用曝光调节，避免与其他操作冲突
         printf("Exposure adjustment temporarily disabled in menu\n");
@@ -2083,7 +2010,7 @@ static void menu_exposure_event_cb(lv_event_t* e) {
 /**
  * @brief 相机增益设置菜单事件回调
  */
-static void menu_gain_event_cb(lv_event_t* e) {
+void menu_gain_event_cb(lv_event_t* e) {
     if (menu_visible && menu_selected_item == 0) {
         // 暂时禁用增益调节，避免与其他操作冲突
         printf("Gain adjustment temporarily disabled in menu\n");
@@ -2101,7 +2028,7 @@ static void menu_gain_event_cb(lv_event_t* e) {
 /**
  * @brief 调高曝光值
  */
-static void adjust_exposure_up(void) {
+void adjust_exposure_up(void) {
     int32_t new_value = current_exposure + exposure_step;
     if (new_value > exposure_max) new_value = exposure_max;
     exposure_value = new_value;
@@ -2113,7 +2040,7 @@ static void adjust_exposure_up(void) {
 /**
  * @brief 调低曝光值
  */
-static void adjust_exposure_down(void) {
+void adjust_exposure_down(void) {
     int32_t new_value = current_exposure - exposure_step;
     if (new_value < exposure_min) new_value = exposure_min;
     exposure_value = new_value;
@@ -2125,7 +2052,7 @@ static void adjust_exposure_down(void) {
 /**
  * @brief 调高增益值
  */
-static void adjust_gain_up(void) {
+void adjust_gain_up(void) {
     int32_t new_value = current_gain + gain_step;
     if (new_value > gain_max) new_value = gain_max;
     gain_value = new_value;
@@ -2137,7 +2064,7 @@ static void adjust_gain_up(void) {
 /**
  * @brief 调低增益值
  */
-static void adjust_gain_down(void) {
+void adjust_gain_down(void) {
     int32_t new_value = current_gain - gain_step;
     if (new_value < gain_min) new_value = gain_min;
     gain_value = new_value;
@@ -2149,7 +2076,7 @@ static void adjust_gain_down(void) {
 /**
  * @brief 更新曝光值并应用到相机
  */
-static void update_exposure_value(int32_t new_value) {
+void update_exposure_value(int32_t new_value) {
     if (subdev_handle < 0) {
         printf("Warning: Camera controls not initialized, cannot set exposure\n");
         return;
@@ -2182,7 +2109,7 @@ static void update_exposure_value(int32_t new_value) {
 /**
  * @brief 更新增益值并应用到相机
  */
-static void update_gain_value(int32_t new_value) {
+void update_gain_value(int32_t new_value) {
     if (subdev_handle < 0) {
         printf("Warning: Camera controls not initialized, cannot set gain\n");
         return;
@@ -2215,7 +2142,7 @@ static void update_gain_value(int32_t new_value) {
 /**
  * @brief 初始化相机控制
  */
-static int init_camera_controls(void) {
+int init_camera_controls(void) {
     // 打开子设备用于控制
     subdev_handle = libmedia_open_subdev("/dev/v4l-subdev2");
     if (subdev_handle < 0) {
@@ -2255,7 +2182,7 @@ static int init_camera_controls(void) {
 /**
  * @brief 清理相机控制
  */
-static void cleanup_camera_controls(void) {
+void cleanup_camera_controls(void) {
     if (subdev_handle >= 0) {
         libmedia_close_subdev(subdev_handle);
         subdev_handle = -1;
@@ -2266,7 +2193,7 @@ static void cleanup_camera_controls(void) {
 /**
  * @brief 创建图片保存目录
  */
-static int create_images_directory(void) {
+int create_images_directory(void) {
     // 创建根目录
     if (mkdir("/root/images", 0755) != 0 && errno != EEXIST) {
         printf("Error: Failed to create /root/images directory: %s\n", strerror(errno));
@@ -2291,7 +2218,7 @@ static int create_images_directory(void) {
 /**
  * @brief 生成照片文件名
  */
-static char* generate_photo_filename(void) {
+char* generate_photo_filename(void) {
     time_t now = time(NULL);
     struct tm* tm_info = localtime(&now);
     
@@ -2311,7 +2238,7 @@ static char* generate_photo_filename(void) {
 /**
  * @brief 捕获RAW格式照片
  */
-static int capture_raw_photo(void) {
+int capture_raw_photo(void) {
     if (!media_session) {
         printf("Error: Camera not initialized\n");
         return -1;
@@ -2420,7 +2347,7 @@ static int capture_raw_photo(void) {
 /**
  * @brief 加载配置文件
  */
-static int load_config_file(mxcamera_config_t* config) {
+int load_config_file(mxcamera_config_t* config) {
     if (!config) return -1;
     
     // 尝试打开配置文件
@@ -2470,7 +2397,7 @@ static int load_config_file(mxcamera_config_t* config) {
 /**
  * @brief 保存配置文件
  */
-static int save_config_file(const mxcamera_config_t* config) {
+int save_config_file(const mxcamera_config_t* config) {
     if (!config) return -1;
     
     // 创建目录（如果不存在）
@@ -2507,7 +2434,7 @@ static int save_config_file(const mxcamera_config_t* config) {
 /**
  * @brief 应用配置
  */
-static void apply_config(const mxcamera_config_t* config) {
+void apply_config(const mxcamera_config_t* config) {
     if (!config) return;
     
     // 应用摄像头配置
@@ -2532,7 +2459,7 @@ static void apply_config(const mxcamera_config_t* config) {
 /**
  * @brief 初始化默认配置
  */
-static void init_default_config(mxcamera_config_t* config) {
+void init_default_config(mxcamera_config_t* config) {
     if (!config) return;
     
     // 设置默认值
@@ -2547,7 +2474,7 @@ static void init_default_config(mxcamera_config_t* config) {
 /**
  * @brief 去除字符串首尾空白字符
  */
-static char* trim_whitespace(char* str) {
+char* trim_whitespace(char* str) {
     char* end;
     
     // 去除开头空白
@@ -2569,7 +2496,7 @@ static char* trim_whitespace(char* str) {
 /**
  * @brief 解析配置文件中的一行
  */
-static int parse_config_line(const char* line, char* key, char* value) {
+int parse_config_line(const char* line, char* key, char* value) {
     const char* delim = "=";
     char* eq_pos = strstr(line, delim);
     
