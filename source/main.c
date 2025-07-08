@@ -218,7 +218,11 @@ static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY
 static volatile int in_adjustment_mode = 0; // 是否在调整模式中
 static volatile int adjustment_type = 0;    // 调整类型 (0=exposure, 1=gain)
 static struct timeval last_activity_time;  // 最后活动时间
-static struct timeval last_time_update;    // 最后时间更新时间
+static struct timeval last_time_update;    // 时间显示更新时间戳
+
+// LCD设备管理
+static fbtft_lcd_t lcd_device;              // LCD设备结构体
+static int lcd_initialized = 0;             // LCD设备初始化状态
 
 // 相机控制状态
 static int subdev_handle = -1;              // 子设备句柄
@@ -1484,20 +1488,16 @@ int main(int argc, char* argv[]) {
     // 初始化帧缓冲设备
     fbdev_init();
     
-    // 检查帧缓冲设备信息并尝试设置横屏
-    printf("Checking framebuffer configuration...\n");
-    system("fbset | grep geometry");
-    
-    // 尝试设置帧缓冲为横屏模式
-    // 注意：这可能需要root权限和设备支持
-    printf("Attempting to set landscape mode...\n");
-    int fb_ret = system("fbset -xres 320 -yres 240 2>/dev/null");
-    if (fb_ret == 0) {
-        printf("Framebuffer set to 320x240\n");
+    // 初始化LCD设备 (用于电源管理)
+    printf("Initializing LCD device for power management...\n");
+    if (fbtft_lcd_init(&lcd_device, "/dev/fb0") == 0) {
+        lcd_initialized = 1;
+        printf("LCD device initialized successfully\n");
     } else {
-        printf("Warning: Could not set framebuffer resolution\n");
+        printf("Warning: LCD device initialization failed, power management disabled\n");
+        lcd_initialized = 0;
     }
-    
+
     // 创建 LVGL 显示缓冲区
     static lv_color_t buf[DISP_BUF_SIZE];
     static lv_disp_draw_buf_t disp_buf;
@@ -1751,6 +1751,13 @@ cleanup:
     printf("Deinitializing libMedia...\n");
     libmedia_deinit();
     
+    // 清理LCD设备
+    if (lcd_initialized) {
+        printf("Deinitializing LCD device...\n");
+        fbtft_lcd_deinit(&lcd_device);
+        lcd_initialized = 0;
+    }
+
     // 清理 GPIO
     printf("Cleaning up GPIO...\n");
     DEV_ModuleExit();
@@ -1992,13 +1999,31 @@ static void menu_confirm_selection(void) {
             printf("Menu: Display %s (camera continues running)\n", 
                    display_enabled ? "ENABLED" : "DISABLED");
             
-            // 控制图像显示
-            if (img_canvas) {
+            // 使用LCD电源管理控制显示开关
+            if (lcd_initialized) {
                 if (display_enabled) {
-                    lv_obj_clear_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                    if (fbtft_lcd_power_on(&lcd_device) == 0) {
+                        printf("LCD power turned ON\n");
+                    } else {
+                        printf("Warning: Failed to turn LCD power ON\n");
+                    }
                 } else {
-                    lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                    if (fbtft_lcd_power_off(&lcd_device) == 0) {
+                        printf("LCD power turned OFF\n");
+                    } else {
+                        printf("Warning: Failed to turn LCD power OFF\n");
+                    }
                 }
+            } else {
+                // 降级到传统方式：控制图像显示
+                if (img_canvas) {
+                    if (display_enabled) {
+                        lv_obj_clear_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                    } else {
+                        lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
+                    }
+                }
+                printf("Warning: Using fallback display control (LCD power management not available)\n");
             }
             break;
             
