@@ -1025,6 +1025,14 @@ create_deployment_package() {
         print_warning "deploy.ps1 不存在，跳过"
     fi
     
+    # 复制配置文件
+    print_status "复制配置文件..."
+    if [ -f "mxCamera_config_example.toml" ]; then
+        cp mxCamera_config_example.toml "$PACKAGE_DIR/"
+    else
+        print_warning "mxCamera_config_example.toml 不存在，跳过"
+    fi
+    
     # 复制启动脚本
     if [ -f "mxcamera" ]; then
         cp mxcamera "$PACKAGE_DIR/"
@@ -1041,6 +1049,7 @@ mxCamera 部署包
 - bin/mxCamera: 主程序可执行文件
 - lib/*.so.*: 动态库文件
 - deploy.ps1: Windows PowerShell 部署脚本
+- mxCamera_config_example.toml: 配置文件模板
 - mxcamera: Linux 启动服务脚本
 - README.txt: 本说明文件
 
@@ -1055,9 +1064,17 @@ mxCamera 部署包
 方法二：手动部署
 1. 将 bin/mxCamera 复制到设备的 /root/Workspace/
 2. 将 lib/*.so.* 复制到设备的 /usr/lib/
-3. 将 mxcamera 复制到设备的 /etc/init.d/S99mxcamera
-4. 在设备上执行: chmod +x /root/Workspace/mxCamera
-5. 在设备上执行: chmod +x /etc/init.d/S99mxcamera
+3. 将 mxCamera_config_example.toml 复制到设备的 /root/Workspace/mxCamera_config.toml
+4. 将 mxcamera 复制到设备的 /etc/init.d/S99mxcamera
+5. 在设备上执行: chmod +x /root/Workspace/mxCamera
+6. 在设备上执行: chmod +x /etc/init.d/S99mxcamera
+
+配置说明：
+=========
+- 配置文件位置: /root/Workspace/mxCamera_config.toml
+- 应用程序启动时会自动读取配置文件
+- 如果配置文件不存在，会使用默认设置并自动创建配置文件
+- 可以手动编辑配置文件来调整摄像头参数（曝光、增益、分辨率等）
 
 注意事项：
 =========

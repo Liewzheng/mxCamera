@@ -98,6 +98,15 @@ if (Test-Path "lib") {
     Write-Warning "lib 目录不存在，跳过库文件部署"
 }
 
+# 部署配置文件
+Write-Host "部署配置文件..." -ForegroundColor Yellow
+if (Test-Path "mxCamera_config_example.toml") {
+    adb push mxCamera_config_example.toml /root/Workspace/mxCamera_config.toml
+    Write-Host "配置文件部署完成: mxCamera_config.toml" -ForegroundColor Green
+} else {
+    Write-Warning "mxCamera_config_example.toml 不存在，跳过配置文件部署"
+}
+
 # 部署启动脚本
 Write-Host "部署启动脚本..." -ForegroundColor Yellow
 if (Test-Path "mxcamera") {
@@ -133,6 +142,7 @@ foreach ($service in $servicesToDisable) {
 Write-Host "" -ForegroundColor White
 Write-Host "=== 部署完成 ===" -ForegroundColor Green
 Write-Host "可执行文件位置: /root/Workspace/mxCamera" -ForegroundColor White
+Write-Host "配置文件位置: /root/Workspace/mxCamera_config.toml" -ForegroundColor White
 Write-Host "启动脚本位置: /etc/init.d/S99mxcamera" -ForegroundColor White
 Write-Host "" -ForegroundColor White
 Write-Host "手动启动方式:" -ForegroundColor Yellow
@@ -143,3 +153,7 @@ Write-Host "  adb shell '/etc/init.d/S99mxcamera start'" -ForegroundColor White
 Write-Host "" -ForegroundColor White
 Write-Host "重启设备自动启动:" -ForegroundColor Yellow
 Write-Host "  adb reboot" -ForegroundColor White
+Write-Host "" -ForegroundColor White
+Write-Host "配置管理:" -ForegroundColor Yellow
+Write-Host "  应用程序会自动读取并保存配置到 /root/Workspace/mxCamera_config.toml" -ForegroundColor White
+Write-Host "  可以直接编辑配置文件来调整摄像头参数" -ForegroundColor White
