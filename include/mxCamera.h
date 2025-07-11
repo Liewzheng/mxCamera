@@ -308,7 +308,5 @@ float get_battery_voltage(void);
 float get_battery_current(void);
 float get_battery_power(void);
 int is_ina219_initialized(void);
-int analyze_system_health(float voltage, float current, float power);
-void print_battery_detailed_status(void);
 
 #endif /* _MXCAMERA_H_ */

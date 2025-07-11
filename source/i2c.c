@@ -34,13 +34,12 @@
 #define INA219_CONFIG_VALUE 0x1FDF // 16V范围，±320mV分流范围，12位，连续模式
 #define INA219_SHUNT_RESISTOR 1.0f // 分流电阻值（欧姆）- 参考 Python 代码
 
-// 校准值 - 直接使用 Python 代码中的值
-// Python 代码中使用 cal_value = 0x029F，基于8A最大预期电流
+// 校准值计算 - 参考 Python 代码的 calculate_calibration 函数
 // max_expected_current = 8.0A, shunt_resistance = 1.0Ω
-// current_lsb = 8.0 / 32768 ≈ 0.000244 A/bit
-// cal_value = trunc(0.04096 / (0.000244 * 1.0)) ≈ 167 = 0x00A7
-// 但Python实际使用0x029F，这对应更低的电流范围
-#define INA219_CALIBRATION_VALUE 0x029F // 使用Python代码中的校准值
+// current_lsb = 8.0 / 32768 ≈ 0.000244140625 A/bit
+// cal_value = trunc(0.04096 / (current_lsb * shunt_resistance))
+// cal_value = trunc(0.04096 / (0.000244140625 * 1.0)) ≈ 167 = 0x00A7
+#define INA219_CALIBRATION_VALUE 0x029F // 根据Python公式计算的校准值
 
 // 电池电量计算参数
 #define BATTERY_VOLTAGE_MIN 4.5f          // 最低电压 (V)
@@ -68,6 +67,23 @@ static pthread_mutex_t i2c_mutex = PTHREAD_MUTEX_INITIALIZER; // I2C 访问互�
 /**
  * @brief 交换字节序（INA219 使用大端序）
  * @param value 16位值
+ * @return 交换后的值(有符号整数)
+ */
+static int16_t swap_bytes_with_sign(uint16_t value)
+{
+    uint16_t swapped = ((value & 0xFF) << 8) | ((value & 0xFF00) >> 8);
+    printf("Debug: Swapping bytes: original=0x%04X, swapped=0x%04X\n", value, swapped);
+
+    if (swapped > 32767)
+    {
+        return (int16_t)(swapped - 65536);
+    }
+    return (int16_t)swapped;
+}
+
+/**
+ * @brief 交换字节序（用于写入 INA219 寄存器）
+ * @param value 16位值
  * @return 交换后的值
  */
 static uint16_t swap_bytes(uint16_t value)
@@ -90,7 +106,7 @@ static int ina219_write_register(uint8_t reg, uint16_t value)
     }
 
     // INA219 期望 MSB 在前，参考 Python 代码的 write_word_swapped
-    uint16_t swapped_value = swap_bytes(value);
+    int16_t swapped_value = swap_bytes(value);
     uint8_t buffer[3] = {reg, (swapped_value >> 8) & 0xFF, swapped_value & 0xFF};
 
     printf("Debug: Writing to reg 0x%02X: original=0x%04X, swapped=0x%04X, bytes=[0x%02X, 0x%02X]\n",
@@ -134,13 +150,21 @@ static int ina219_read_register(uint8_t reg, uint16_t *value)
         return -1;
     }
 
-    // 参考 Python 代码：INA219 使用 MSB 在前，但 smbus 返回 LSB 在前
-    // 所以我们需要交换字节：从 little-endian 转换为 big-endian
-    uint16_t raw_value = (buffer[0] << 8) | buffer[1]; // 这已经是正确的字节序
-    *value = raw_value;
+    if (reg == INA219_REG_SHUNT_VOLTAGE || reg == INA219_REG_CURRENT)
+    {
+        // 参考 Python 代码：INA219 使用 MSB 在前，但 smbus 返回 LSB 在前
+        // 所以我们需要交换字节：从 little-endian 转换为 big-endian
+        uint16_t raw_value = (buffer[0] << 8) | buffer[1];
+        *value = swap_bytes_with_sign(raw_value);
+    }
+    else
+    {
+        // 对于其他寄存器，直接使用大端序
+        *value = (buffer[0] << 8) | buffer[1];
+    }
 
     printf("Debug: Read from reg 0x%02X: bytes=[0x%02X, 0x%02X], value=0x%04X\n",
-           reg, buffer[0], buffer[1], raw_value);
+           reg, buffer[0], buffer[1], *value);
 
     return 0;
 }
@@ -252,7 +276,6 @@ int init_ina219(void)
         "32V/±320mV/12bit"};
 
     int config_success = 0;
-    uint16_t working_config = 0;
 
     for (int i = 0; i < 4; i++)
     {
@@ -270,7 +293,6 @@ int init_ina219(void)
                 if (verify_config == test_configs[i])
                 {
                     printf("  ✓ Configuration verified successfully\n");
-                    working_config = test_configs[i];
                     config_success = 1;
                     break;
                 }
@@ -294,7 +316,6 @@ int init_ina219(void)
     {
         printf("Warning: All configuration attempts failed, using last readback value\n");
         // 仍然尝试使用设备，可能设备有自己的默认配置
-        working_config = reset_config;
     }
 
     // 设置校准值
@@ -417,8 +438,8 @@ int read_ina219_data(float *bus_voltage, float *shunt_voltage, float *current, f
     else
     {
         // 参考 Python 代码的转换逻辑
-        printf("Debug: Raw values - Bus: 0x%04X, Shunt: 0x%04X, Current: 0x%04X, Power: 0x%04X\n",
-               bus_voltage_raw, shunt_voltage_raw, current_raw, power_raw);
+        // printf("Debug: Raw values - Bus: 0x%04X, Shunt: 0x%04X, Current: 0x%04X, Power: 0x%04X\n",
+        //        bus_voltage_raw, shunt_voltage_raw, current_raw, power_raw);
 
         // 分流电压：LSB = 10μV (有符号值) - 参考 Python 代码
         int16_t shunt_signed = (int16_t)shunt_voltage_raw;
@@ -426,14 +447,14 @@ int read_ina219_data(float *bus_voltage, float *shunt_voltage, float *current, f
 
         // 总线电压：LSB = 4mV，需要右移3位（位15-3有效）- 参考 Python 代码
         // 检查转换就绪位（位1 = CNVR）和溢出标志（位0 = OVF）
-        printf("Debug: Bus voltage raw: 0x%04X, CNVR bit: %d, OVF bit: %d\n",
-               bus_voltage_raw, (bus_voltage_raw & 0x02) ? 1 : 0, (bus_voltage_raw & 0x01) ? 1 : 0);
+        // printf("Debug: Bus voltage raw: 0x%04X, CNVR bit: %d, OVF bit: %d\n",
+        //        bus_voltage_raw, (bus_voltage_raw & 0x02) ? 1 : 0, (bus_voltage_raw & 0x01) ? 1 : 0);
 
         // 直接计算电压值，参考 Python 代码的处理方式
         // 在5V系统中，溢出位可能被设置但仍需要读取电压值
         *bus_voltage = (bus_voltage_raw >> 3) * 0.004f; // 转换为 V
-        printf("Debug: Bus voltage calculated: %.3fV (raw shifted: 0x%04X)\n",
-               (double)*bus_voltage, (bus_voltage_raw >> 3));
+        // printf("Debug: Bus voltage calculated: %.3fV (raw shifted: 0x%04X)\n",
+        //        (double)*bus_voltage, (bus_voltage_raw >> 3));
 
         // 检查电压是否在合理范围内
         if (*bus_voltage < 0.1f || *bus_voltage > 6.0f)
@@ -441,16 +462,20 @@ int read_ina219_data(float *bus_voltage, float *shunt_voltage, float *current, f
             printf("Warning: Bus voltage out of reasonable range: %.3fV\n", (double)*bus_voltage);
         }
 
-        // 电流：使用与Python代码一致的 current_lsb
-        // Python: current_lsb = max_expected_current / 32768 = 8.0 / 32768 ≈ 0.000244
-        // 但校准值0x029F对应不同的current_lsb，让我们使用Python的实际计算
-        float current_lsb = 0.0001f; // Python代码中的current_lsb值
+        // 电流计算：根据 Python 代码中的实际公式
+        // Python 代码：current_lsb = max_expected_current / 32768
+        // 使用与 Python 一致的参数：max_expected_current = 8.0A, shunt_resistance = 1.0Ω
+        // current_lsb = 8.0 / 32768 ≈ 0.000244140625 A/bit
+        float current_lsb = 8.0f / 32768.0f; // ≈ 0.000244140625 A/bit
         int16_t current_signed = (int16_t)current_raw;
         *current = current_signed * current_lsb; // 转换为 A
 
         // 功率：LSB = 20 * Current_LSB - 参考 Python 代码
         float power_lsb = 20.0f * current_lsb;
         *power = power_raw * power_lsb; // 转换为 W
+
+        // printf("Debug: Current calculation - raw: 0x%04X, signed: %d, lsb: %.9f, result: %.3fA\n",
+        //        current_raw, current_signed, (double)current_lsb, (double)*current);
 
         printf("Debug: Converted values - Bus: %.3fV, Shunt: %.3fmV, Current: %.3fA, Power: %.3fW\n",
                (double)*bus_voltage, (double)(*shunt_voltage * 1000.0f), (double)*current, (double)*power);
@@ -551,16 +576,15 @@ int update_battery_status(void)
         current_current = current;
         current_power = power;
 
-        float old_percentage = current_battery_percentage;
         float new_percentage = calculate_battery_percentage(bus_voltage);
 
-        // 应用简单的滤波：只有当变化超过5%时才更新显示的百分比
+        // 应用简单的滤波：只有当变化超过2.5%时才更新显示的百分比
         // 这样可以减少因为小的电压波动导致的百分比频繁变化
         float percentage_change = fabsf(new_percentage - last_stable_percentage);
 
-        if (last_stable_percentage == 0.0f || percentage_change >= 5.0f)
+        if (last_stable_percentage == 0.0f || percentage_change >= 2.5f)
         {
-            // 首次初始化或变化超过5%时更新
+            // 首次初始化或变化超过2.5%时更新
             current_battery_percentage = new_percentage;
             last_stable_percentage = new_percentage;
             printf("Debug: Battery percentage updated to %.1f%% (change: %.1f%%)\n",
@@ -568,8 +592,8 @@ int update_battery_status(void)
         }
         else
         {
-            // 变化小于5%时保持当前显示值，但记录实际值用于调试
-            printf("Debug: Battery percentage filtered - actual: %.1f%%, displayed: %.1f%% (change: %.1f%% < 5%%)\n",
+            // 变化小于2.5%时保持当前显示值，但记录实际值用于调试
+            printf("Debug: Battery percentage filtered - actual: %.1f%%, displayed: %.1f%% (change: %.1f%% < 2.5%%)\n",
                    (double)new_percentage, (double)current_battery_percentage, (double)percentage_change);
         }
 
@@ -629,138 +653,4 @@ float get_battery_power(void)
 int is_ina219_initialized(void)
 {
     return ina219_initialized;
-}
-
-/**
- * @brief 分析5V系统健康状态
- * @param voltage 电压 (V)
- * @param current 电流 (A)
- * @param power 功率 (W)
- * @return 健康评分 (0-100)
- */
-int analyze_system_health(float voltage, float current, float power)
-{
-    int voltage_score = 0;
-    int current_score = 0;
-    int power_score = 0;
-
-    // 电压评分
-    if (voltage >= 4.75f && voltage <= 5.25f)
-    {
-        voltage_score = 100;
-    }
-    else if (voltage >= 4.5f && voltage <= 5.5f)
-    {
-        voltage_score = 70;
-    }
-    else
-    {
-        voltage_score = 30;
-    }
-
-    // 电流评分
-    if (current <= 3.0f)
-    {
-        current_score = 100;
-    }
-    else if (current <= 4.0f)
-    {
-        current_score = 80;
-    }
-    else if (current <= 5.0f)
-    {
-        current_score = 60;
-    }
-    else
-    {
-        current_score = 30;
-    }
-
-    // 功率评分
-    if (power <= 15.0f)
-    {
-        power_score = 100;
-    }
-    else if (power <= 20.0f)
-    {
-        power_score = 80;
-    }
-    else if (power <= 25.0f)
-    {
-        power_score = 60;
-    }
-    else
-    {
-        power_score = 30;
-    }
-
-    // 综合评分（加权平均）
-    int health_score = (voltage_score * 40 + current_score * 30 + power_score * 30) / 100;
-    return fmaxf(0, fminf(100, health_score));
-}
-
-/**
- * @brief 打印详细的电池和系统状态
- */
-void print_battery_detailed_status(void)
-{
-    if (!ina219_initialized)
-    {
-        printf("INA219 not initialized\n");
-        return;
-    }
-
-    float voltage, shunt_voltage, current, power;
-
-    if (read_ina219_data(&voltage, &shunt_voltage, &current, &power) == 0)
-    {
-        int health_score = analyze_system_health(voltage, current, power);
-        float battery_percentage = calculate_battery_percentage(voltage);
-
-        printf("\n=== INA219 Battery & System Status ===\n");
-        printf("Voltage: %.3f V\n", (double)voltage);
-        printf("Current: %.3f A\n", (double)current);
-        printf("Power: %.3f W\n", (double)power);
-        printf("Shunt Voltage: %.3f mV\n", (double)(shunt_voltage * 1000.0f));
-        printf("Battery Percentage: %.1f%%\n", (double)battery_percentage);
-        printf("System Health Score: %d/100\n", health_score);
-
-        // 状态分析
-        if (voltage < 4.5f)
-        {
-            printf("⚠️  WARNING: Low voltage (%.3fV < 4.5V)\n", (double)voltage);
-        }
-        else if (voltage > 5.3f)
-        {
-            printf("⚠️  WARNING: High voltage (%.3fV > 5.3V)\n", (double)voltage);
-        }
-        else
-        {
-            printf("✅ Voltage normal\n");
-        }
-
-        if (current > 4.0f)
-        {
-            printf("⚠️  WARNING: High current (%.3fA > 4.0A)\n", (double)current);
-        }
-        else
-        {
-            printf("✅ Current normal\n");
-        }
-
-        if (power > 20.0f)
-        {
-            printf("⚠️  WARNING: High power (%.3fW > 20.0W)\n", (double)power);
-        }
-        else
-        {
-            printf("✅ Power consumption normal\n");
-        }
-
-        printf("======================================\n");
-    }
-    else
-    {
-        printf("Failed to read INA219 data\n");
-    }
 }
