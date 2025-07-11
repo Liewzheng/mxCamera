@@ -1669,7 +1669,7 @@ cleanup:
 }
 
 /**
- * @brief 更新时间和电池显示 (时间每分钟更新，电池每10秒更新)
+ * @brief 更新时间和电池显示 (时间每分钟更新，电池每5秒更新)
  */
 void update_time_display(void) {
     if (!time_label || !screen_on) return;
@@ -1691,25 +1691,36 @@ void update_time_display(void) {
     char time_str[32];
     strftime(time_str, 16, "%H:%M", tm_info);
     
-    // 初始化或更新电池状态（每10秒更新一次）
+    // 初始化或更新电池状态（每5秒更新一次）
     static float last_battery_percentage = -1.0f;
+    static bool need_display_update = false;
     bool is_charging = false;
-    if (battery_time_diff >= 10000000 || last_battery_percentage < 0) { // 10秒
+    
+    if (battery_time_diff >= 5000000 || last_battery_percentage < 0) { // 5秒
         if (is_ina219_initialized()) {
             update_battery_status();
-            last_battery_percentage = get_battery_percentage();
-            last_battery_update = current_time;
-
-            if (get_battery_current() < 0.0f) {
-                is_charging = true; // 负电流表示充电
-            } else {
-                is_charging = false; // 正电流表示放电
-            }
+            float new_percentage = get_battery_percentage();
             
-            printf("Battery status updated: %.1f%%\n", (double)last_battery_percentage);
+            // 只有当电池百分比变化时才更新显示
+            if (fabsf(new_percentage - last_battery_percentage) >= 0.1f || last_battery_percentage < 0) {
+                last_battery_percentage = new_percentage;
+                need_display_update = true;
+                
+                if (get_battery_current() < 0.0f) {
+                    is_charging = true; // 负电流表示充电
+                } else {
+                    is_charging = false; // 正电流表示放电
+                }
+                
+                printf("Battery status updated: %.1f%%\n", (double)last_battery_percentage);
+            }
+            last_battery_update = current_time;
         } else {
             printf("Cannot access battery percentage - INA219 not initialized\n");
-            last_battery_percentage = -1.0f;
+            if (last_battery_percentage != -1.0f) {
+                last_battery_percentage = -1.0f;
+                need_display_update = true;
+            }
         }
     }
     
@@ -1733,14 +1744,20 @@ void update_time_display(void) {
         snprintf(display_str, sizeof(display_str), "%s  #ffffff N/A%%#", time_str);
     }
     
-    // 更新显示（时间每分钟更新，但电池状态变化时也更新）
-    if (time_diff >= 60000000 || battery_time_diff >= 10000000) { // 时间更新或电池状态更新
+    // 更新显示：时间每分钟更新 OR 电池状态有变化时更新
+    if (time_diff >= 60000000 || need_display_update) {
         // 启用富文本模式以支持颜色
         lv_label_set_recolor(time_label, true);
         lv_label_set_text(time_label, display_str);
         
         if (time_diff >= 60000000) {
             last_time_update = current_time;
+            printf("Time display updated: %s\n", time_str);
+        }
+        
+        if (need_display_update) {
+            need_display_update = false;
+            printf("Display updated due to battery status change\n");
         }
     }
 }
