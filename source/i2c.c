@@ -31,15 +31,14 @@
 #define INA219_REG_CALIBRATION 0x05
 
 // 配置值和校准值（参考 i2c.py）
-#define INA219_CONFIG_VALUE 0x1FDF // 16V范围，±320mV分流范围，12位，连续模式
-#define INA219_SHUNT_RESISTOR 1.0f // 分流电阻值（欧姆）- 参考 Python 代码
+#define INA219_CONFIG_VALUE 0x1E9F 
+#define INA219_SHUNT_RESISTOR 0.5f // 分流电阻值（欧姆）- 参考 Python 代码
 
 // 校准值计算 - 参考 Python 代码的 calculate_calibration 函数
-// max_expected_current = 8.0A, shunt_resistance = 1.0Ω
-// current_lsb = 8.0 / 32768 ≈ 0.000244140625 A/bit
-// cal_value = trunc(0.04096 / (current_lsb * shunt_resistance))
-// cal_value = trunc(0.04096 / (0.000244140625 * 1.0)) ≈ 167 = 0x00A7
 #define INA219_CALIBRATION_VALUE 0x029F // 根据Python公式计算的校准值
+
+// LSB
+#define INA219_CURRENT_LSB 0.0001f 
 
 // 电池电量计算参数
 #define BATTERY_VOLTAGE_MIN 4.5f          // 最低电压 (V)
@@ -65,33 +64,6 @@ static pthread_mutex_t i2c_mutex = PTHREAD_MUTEX_INITIALIZER; // I2C 访问互�
 // ============================================================================
 
 /**
- * @brief 交换字节序（INA219 使用大端序）
- * @param value 16位值
- * @return 交换后的值(有符号整数)
- */
-static int16_t swap_bytes_with_sign(uint16_t value)
-{
-    uint16_t swapped = ((value & 0xFF) << 8) | ((value & 0xFF00) >> 8);
-    printf("Debug: Swapping bytes: original=0x%04X, swapped=0x%04X\n", value, swapped);
-
-    if (swapped > 32767)
-    {
-        return (int16_t)(swapped - 65536);
-    }
-    return (int16_t)swapped;
-}
-
-/**
- * @brief 交换字节序（用于写入 INA219 寄存器）
- * @param value 16位值
- * @return 交换后的值
- */
-static uint16_t swap_bytes(uint16_t value)
-{
-    return ((value & 0xFF) << 8) | ((value & 0xFF00) >> 8);
-}
-
-/**
  * @brief 向 INA219 写入字寄存器
  * @param reg 寄存器地址
  * @param value 要写入的值
@@ -105,13 +77,12 @@ static int ina219_write_register(uint8_t reg, uint16_t value)
         return -1;
     }
 
-    // INA219 期望 MSB 在前，参考 Python 代码的 write_word_swapped
-    int16_t swapped_value = swap_bytes(value);
-    uint8_t buffer[3] = {reg, (swapped_value >> 8) & 0xFF, swapped_value & 0xFF};
-
-    printf("Debug: Writing to reg 0x%02X: original=0x%04X, swapped=0x%04X, bytes=[0x%02X, 0x%02X]\n",
-           reg, value, swapped_value, buffer[1], buffer[2]);
-
+    // INA219 使用大端序 (MSB first)
+    uint8_t buffer[3] = {reg, (value >> 8) & 0xFF, value & 0xFF};
+    
+    printf("Debug: Writing to reg 0x%02X: value=0x%04X, bytes=[0x%02X, 0x%02X]\n",
+           reg, value, buffer[1], buffer[2]);
+    
     if (write(i2c_fd, buffer, 3) != 3)
     {
         printf("Error: Failed to write to INA219 register 0x%02X: %s\n", reg, strerror(errno));
@@ -150,41 +121,11 @@ static int ina219_read_register(uint8_t reg, uint16_t *value)
         return -1;
     }
 
-    if (reg == INA219_REG_SHUNT_VOLTAGE || reg == INA219_REG_CURRENT)
-    {
-        // 参考 Python 代码：INA219 使用 MSB 在前，但 smbus 返回 LSB 在前
-        // 所以我们需要交换字节：从 little-endian 转换为 big-endian
-        uint16_t raw_value = (buffer[0] << 8) | buffer[1];
-        *value = swap_bytes_with_sign(raw_value);
-    }
-    else
-    {
-        // 对于其他寄存器，直接使用大端序
-        *value = (buffer[0] << 8) | buffer[1];
-    }
+    *value = (buffer[0] << 8) | buffer[1];
 
     printf("Debug: Read from reg 0x%02X: bytes=[0x%02X, 0x%02X], value=0x%04X\n",
            reg, buffer[0], buffer[1], *value);
 
-    return 0;
-}
-
-/**
- * @brief 读取有符号寄存器值（用于分流电压和电流）
- * @param reg 寄存器地址
- * @param value 输出读取的有符号值
- * @return 0 成功，-1 失败
- */
-static int ina219_read_signed_register(uint8_t reg, int16_t *value)
-{
-    uint16_t raw_value;
-    if (ina219_read_register(reg, &raw_value) != 0)
-    {
-        return -1;
-    }
-
-    // 转换为有符号整数
-    *value = (int16_t)raw_value;
     return 0;
 }
 
@@ -226,21 +167,6 @@ int init_ina219(void)
     printf("INA219 I2C communication established on bus %d, address 0x%02X\n",
            INA219_I2C_BUS, INA219_DEVICE_ADDRESS);
 
-    // 首先读取当前配置以检查通信
-    uint16_t initial_config;
-    if (ina219_read_register(INA219_REG_CONFIG, &initial_config) == 0)
-    {
-        printf("INA219 initial config: 0x%04X\n", initial_config);
-    }
-    else
-    {
-        printf("Error: Failed to read initial INA219 configuration\n");
-        close(i2c_fd);
-        i2c_fd = -1;
-        pthread_mutex_unlock(&i2c_mutex);
-        return -1;
-    }
-
     // 重置设备
     printf("Resetting INA219...\n");
     if (ina219_write_register(INA219_REG_CONFIG, 0x8000) != 0)
@@ -252,131 +178,73 @@ int init_ina219(void)
         return -1;
     }
 
-    usleep(50000); // 增加重置等待时间到50ms
+    usleep(100000); // 增加重置等待时间到50ms
 
-    // 验证重置完成
-    uint16_t reset_config;
-    if (ina219_read_register(INA219_REG_CONFIG, &reset_config) == 0)
+    // 配置 INA219
+    printf("Setting INA219 configuration value: 0x%04X\n", INA219_CONFIG_VALUE);
+    if (ina219_write_register(INA219_REG_CONFIG, INA219_CONFIG_VALUE) != 0)
     {
-        printf("INA219 config after reset: 0x%04X\n", reset_config);
+        printf("Error: Failed to set INA219 configuration\n");
+        close(i2c_fd);
+        i2c_fd = -1;
+        pthread_mutex_unlock(&i2c_mutex);
+        return -1;
     }
 
-    // 尝试多种配置，找到适合的配置
-    uint16_t test_configs[] = {
-        0x1FDF, // 原始配置：16V范围，±320mV，12位，连续模式
-        0x199F, // 16V范围，±160mV，12位，连续模式
-        0x19DF, // 16V范围，±320mV，9位，连续模式
-        0x399F  // 32V范围，±320mV，12位，连续模式
-    };
-
-    const char *config_names[] = {
-        "16V/±320mV/12bit",
-        "16V/±160mV/12bit",
-        "16V/±320mV/9bit",
-        "32V/±320mV/12bit"};
-
-    int config_success = 0;
-
-    for (int i = 0; i < 4; i++)
-    {
-        printf("Trying INA219 config %d: %s (0x%04X)\n", i + 1, config_names[i], test_configs[i]);
-
-        if (ina219_write_register(INA219_REG_CONFIG, test_configs[i]) == 0)
-        {
-            usleep(10000); // 等待配置生效
-
-            uint16_t verify_config;
-            if (ina219_read_register(INA219_REG_CONFIG, &verify_config) == 0)
-            {
-                printf("  Written: 0x%04X, Read back: 0x%04X\n", test_configs[i], verify_config);
-
-                if (verify_config == test_configs[i])
-                {
-                    printf("  ✓ Configuration verified successfully\n");
-                    config_success = 1;
-                    break;
-                }
-                else
-                {
-                    printf("  ✗ Configuration verification failed\n");
-                }
-            }
-            else
-            {
-                printf("  ✗ Failed to read back configuration\n");
-            }
-        }
-        else
-        {
-            printf("  ✗ Failed to write configuration\n");
-        }
-    }
-
-    if (!config_success)
-    {
-        printf("Warning: All configuration attempts failed, using last readback value\n");
-        // 仍然尝试使用设备，可能设备有自己的默认配置
-    }
 
     // 设置校准值
     printf("Setting INA219 calibration value: 0x%04X\n", INA219_CALIBRATION_VALUE);
     if (ina219_write_register(INA219_REG_CALIBRATION, INA219_CALIBRATION_VALUE) != 0)
     {
-        printf("Warning: Failed to set INA219 calibration, continuing anyway\n");
+        printf("Error: Failed to set INA219 calibration, continuing anyway\n");
+        close(i2c_fd);
+        i2c_fd = -1;
+        pthread_mutex_unlock(&i2c_mutex);
+        return -1;
+    }
+
+    // 测试读取 INA219_CALIBRATION_VALUE 用以验证
+    uint16_t config_value;
+    if (ina219_read_register(INA219_REG_CONFIG, &config_value) != 0)
+    {
+        printf("Error: Failed to read INA219 configuration register\n");
+        close(i2c_fd);
+        i2c_fd = -1;
+        pthread_mutex_unlock(&i2c_mutex);
+        return -1;
+    }
+
+    if (config_value != INA219_CONFIG_VALUE)
+    {
+        printf("Warning: INA219 configuration mismatch! Expected 0x%04X, got 0x%04X\n",
+               INA219_CONFIG_VALUE, config_value);
     }
     else
     {
-        // 验证校准值
-        uint16_t cal_readback;
-        if (ina219_read_register(INA219_REG_CALIBRATION, &cal_readback) == 0)
-        {
-            printf("Calibration written: 0x%04X, read back: 0x%04X\n",
-                   INA219_CALIBRATION_VALUE, cal_readback);
-        }
+        printf("INA219 configuration verified successfully\n");
     }
 
-    // 测试读取一些寄存器来验证通信
-    uint16_t bus_voltage_raw, shunt_voltage_raw;
-    if (ina219_read_register(INA219_REG_BUS_VOLTAGE, &bus_voltage_raw) == 0 &&
-        ina219_read_register(INA219_REG_SHUNT_VOLTAGE, &shunt_voltage_raw) == 0)
+    // 测试读取 INA219_REG_CONFIG 用以验证
+    uint16_t calibration_value;
+    if (ina219_read_register(INA219_REG_CALIBRATION, &calibration_value) != 0)
     {
-
-        printf("Initial readings - Bus: 0x%04X, Shunt: 0x%04X\n",
-               bus_voltage_raw, shunt_voltage_raw);
-
-        // 转换并显示实际值用于调试
-        float test_bus_voltage = 0;
-        if ((bus_voltage_raw & 0x02) == 0x02)
-        { // 检查转换就绪标志
-            if ((bus_voltage_raw & 0x01) == 0)
-            {                                                       // 检查溢出标志
-                test_bus_voltage = (bus_voltage_raw >> 3) * 0.004f; // 转换为 V
-                printf("Initial bus voltage: %.3f V\n", (double)test_bus_voltage);
-            }
-            else
-            {
-                printf("Initial reading: Bus voltage overflow detected\n");
-            }
-        }
-        else
-        {
-            printf("Initial reading: Bus voltage conversion not ready\n");
-        }
-
-        float test_shunt_voltage = (int16_t)shunt_voltage_raw * 0.00001f;
-        printf("Initial shunt voltage: %.3f mV\n", (double)(test_shunt_voltage * 1000.0f));
-
-        // 简单的健全性检查
-        if (bus_voltage_raw != 0 || shunt_voltage_raw != 0)
-        {
-            printf("INA219 appears to be responding with valid data\n");
-            ina219_initialized = 1;
-            pthread_mutex_unlock(&i2c_mutex);
-            return 0;
-        }
+        printf("Error: Failed to read INA219 calibration register\n");
+        close(i2c_fd);
+        i2c_fd = -1;
+        pthread_mutex_unlock(&i2c_mutex);
+        return -1;
     }
 
-    printf("Warning: INA219 communication issues detected, but marking as initialized for testing\n");
+    if (calibration_value != INA219_CALIBRATION_VALUE)
+    {
+        printf("Warning: INA219 calibration mismatch! Expected 0x%04X, got 0x%04X\n",
+               INA219_CALIBRATION_VALUE, calibration_value);
+    }
+    else
+    {
+        printf("INA219 calibration verified successfully\n");
+    }
+
     ina219_initialized = 1; // 仍然标记为已初始化，以便测试
     pthread_mutex_unlock(&i2c_mutex);
     return 0;
@@ -424,6 +292,9 @@ int read_ina219_data(float *bus_voltage, float *shunt_voltage, float *current, f
     uint16_t current_raw;       // 先读取为无符号，后面处理符号
     uint16_t power_raw;
 
+    int16_t bus_voltage_raw_signed;
+    int16_t shunt_voltage_raw_signed;
+
     int ret = 0;
 
     if (ina219_read_register(INA219_REG_BUS_VOLTAGE, &bus_voltage_raw) != 0 ||
@@ -431,51 +302,52 @@ int read_ina219_data(float *bus_voltage, float *shunt_voltage, float *current, f
         ina219_read_register(INA219_REG_CURRENT, &current_raw) != 0 ||
         ina219_read_register(INA219_REG_POWER, &power_raw) != 0)
     {
-
         printf("Error: Failed to read INA219 registers\n");
         ret = -1;
     }
     else
     {
-        // 参考 Python 代码的转换逻辑
-        // printf("Debug: Raw values - Bus: 0x%04X, Shunt: 0x%04X, Current: 0x%04X, Power: 0x%04X\n",
-        //        bus_voltage_raw, shunt_voltage_raw, current_raw, power_raw);
-
-        // 分流电压：LSB = 10μV (有符号值) - 参考 Python 代码
-        int16_t shunt_signed = (int16_t)shunt_voltage_raw;
-        *shunt_voltage = shunt_signed * 0.00001f; // 转换为 V
-
-        // 总线电压：LSB = 4mV，需要右移3位（位15-3有效）- 参考 Python 代码
-        // 检查转换就绪位（位1 = CNVR）和溢出标志（位0 = OVF）
-        // printf("Debug: Bus voltage raw: 0x%04X, CNVR bit: %d, OVF bit: %d\n",
-        //        bus_voltage_raw, (bus_voltage_raw & 0x02) ? 1 : 0, (bus_voltage_raw & 0x01) ? 1 : 0);
-
-        // 直接计算电压值，参考 Python 代码的处理方式
-        // 在5V系统中，溢出位可能被设置但仍需要读取电压值
-        *bus_voltage = (bus_voltage_raw >> 3) * 0.004f; // 转换为 V
-        // printf("Debug: Bus voltage calculated: %.3fV (raw shifted: 0x%04X)\n",
-        //        (double)*bus_voltage, (bus_voltage_raw >> 3));
-
-        // 检查电压是否在合理范围内
-        if (*bus_voltage < 0.1f || *bus_voltage > 6.0f)
+        if (bus_voltage_raw > 32767)
         {
-            printf("Warning: Bus voltage out of reasonable range: %.3fV\n", (double)*bus_voltage);
+            bus_voltage_raw_signed = bus_voltage_raw - 65536; // 处理有符号整数
+        }
+        else
+        {
+            bus_voltage_raw_signed = (int16_t)bus_voltage_raw; // 直接转换为有符号整数
+        }
+        if (shunt_voltage_raw > 32767)
+        {
+            shunt_voltage_raw_signed = shunt_voltage_raw - 65536; // 处理有符号整数
+        }
+        else
+        {
+            shunt_voltage_raw_signed = (int16_t)shunt_voltage_raw; // 直接转换为有符号整数
         }
 
-        // 电流计算：根据 Python 代码中的实际公式
-        // Python 代码：current_lsb = max_expected_current / 32768
-        // 使用与 Python 一致的参数：max_expected_current = 8.0A, shunt_resistance = 1.0Ω
-        // current_lsb = 8.0 / 32768 ≈ 0.000244140625 A/bit
-        float current_lsb = 8.0f / 32768.0f; // ≈ 0.000244140625 A/bit
-        int16_t current_signed = (int16_t)current_raw;
-        *current = current_signed * current_lsb; // 转换为 A
+        // 分流电压：LSB = 10μV (有符号值) - 参考 Python 代码
+        *shunt_voltage = shunt_voltage_raw_signed * 0.00001f; // 转换为 V
 
-        // 功率：LSB = 20 * Current_LSB - 参考 Python 代码
-        float power_lsb = 20.0f * current_lsb;
-        *power = power_raw * power_lsb; // 转换为 W
+        // 检查 bus_voltage_raw 的 ready 位 和 溢出 位
+        if ((bus_voltage_raw_signed & 0x02) == 0x02)
+        { // 检查转换就绪标志
+            if ((bus_voltage_raw_signed & 0x01) == 0)
+            { // 检查溢出标志
+                *bus_voltage = (bus_voltage_raw_signed >> 3) * 0.004f; // 转换为 V
+            }
+            else
+            {
+                printf("Warning: Bus voltage overflow detected\n");
+                *bus_voltage = -1.0f; // 溢出时设置为无效值
+            }
+        }
+        else
+        {
+            printf("Warning: Bus voltage conversion not ready\n");
+            *bus_voltage = -1.0f; // 未准备好时设置为无效值
+        }
 
-        // printf("Debug: Current calculation - raw: 0x%04X, signed: %d, lsb: %.9f, result: %.3fA\n",
-        //        current_raw, current_signed, (double)current_lsb, (double)*current);
+        *current = (int16_t)current_raw * INA219_CURRENT_LSB; // 转换为 A
+        *power = power_raw * 20.0f * INA219_CURRENT_LSB; // 转换为 W
 
         printf("Debug: Converted values - Bus: %.3fV, Shunt: %.3fmV, Current: %.3fA, Power: %.3fW\n",
                (double)*bus_voltage, (double)(*shunt_voltage * 1000.0f), (double)*current, (double)*power);

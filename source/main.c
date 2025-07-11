@@ -1693,11 +1693,18 @@ void update_time_display(void) {
     
     // 初始化或更新电池状态（每10秒更新一次）
     static float last_battery_percentage = -1.0f;
+    bool is_charging = false;
     if (battery_time_diff >= 10000000 || last_battery_percentage < 0) { // 10秒
         if (is_ina219_initialized()) {
             update_battery_status();
             last_battery_percentage = get_battery_percentage();
             last_battery_update = current_time;
+
+            if (get_battery_current() < 0.0f) {
+                is_charging = true; // 负电流表示充电
+            } else {
+                is_charging = false; // 正电流表示放电
+            }
             
             printf("Battery status updated: %.1f%%\n", (double)last_battery_percentage);
         } else {
@@ -1709,13 +1716,27 @@ void update_time_display(void) {
     // 更新显示内容（增加缓冲区大小以避免截断警告）
     char display_str[64];
     if (last_battery_percentage >= 0) {
-        snprintf(display_str, sizeof(display_str), "%s %.0f%%", time_str, (double)last_battery_percentage);
+        // 根据电池电量决定显示颜色
+        if (last_battery_percentage < 20.0f && !is_charging) {
+            // 电量低于20%时显示红色
+            snprintf(display_str, sizeof(display_str), "%s  #ff0000 %.0f%%#", time_str, (double)last_battery_percentage);
+        } 
+        else if (is_charging) {
+            // 充电状态显示绿色
+            snprintf(display_str, sizeof(display_str), "%s  #00ff00 %.0f%%#", time_str, (double)last_battery_percentage);
+        }
+        else {
+            // 正常电量显示白色
+            snprintf(display_str, sizeof(display_str), "%s  #ffffff %.0f%%#", time_str, (double)last_battery_percentage);
+        }
     } else {
-        snprintf(display_str, sizeof(display_str), "%s N/A", time_str);
+        snprintf(display_str, sizeof(display_str), "%s  #ffffff N/A%%#", time_str);
     }
     
     // 更新显示（时间每分钟更新，但电池状态变化时也更新）
     if (time_diff >= 60000000 || battery_time_diff >= 10000000) { // 时间更新或电池状态更新
+        // 启用富文本模式以支持颜色
+        lv_label_set_recolor(time_label, true);
         lv_label_set_text(time_label, display_str);
         
         if (time_diff >= 60000000) {
