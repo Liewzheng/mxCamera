@@ -125,7 +125,8 @@ $servicesToDisable = @(
     "S50telnet",
     "S60micinit", 
     "S99hciinit",
-    "S99python"
+    "S99python",
+    "S99usb0config"
 )
 
 foreach ($service in $servicesToDisable) {
