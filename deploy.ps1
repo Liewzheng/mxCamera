@@ -129,11 +129,13 @@ $servicesToDisable = @(
     "S99usb0config"
 )
 
+adb shell "mkdir -p /etc/init_d_backup/"
+
 foreach ($service in $servicesToDisable) {
     $servicePath = "/etc/init.d/$service"
     $checkResult = adb shell "[ -f $servicePath ] && echo 'exists' || echo 'not_found'"
     if ($checkResult.Trim() -eq "exists") {
-        adb shell "mv $servicePath ${servicePath}.disabled"
+        adb shell "mv $servicePath /etc/init_d_backup/${service}"
         Write-Host "已禁用服务: $service" -ForegroundColor Green
     } else {
         Write-Host "服务 $service 不存在，跳过" -ForegroundColor Yellow
