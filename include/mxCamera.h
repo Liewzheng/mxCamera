@@ -42,49 +42,6 @@
 #include <sys/socket.h>
 #include <sys/select.h>
 
-// // ============================================================================
-// // 系统配置常量
-// // ============================================================================
-
-// #define DISP_BUF_SIZE (320 * 240)
-
-// // 摄像头配置 (默认值，可通过命令行参数覆盖)
-// #define DEFAULT_CAMERA_WIDTH 1920
-// #define DEFAULT_CAMERA_HEIGHT 1080
-// #define CAMERA_PIXELFORMAT V4L2_PIX_FMT_SBGGR10
-// #define DEFAULT_CAMERA_DEVICE "/dev/video0"
-// #define BUFFER_COUNT 4
-
-// // 显示配置 (横屏模式)
-// #define DISPLAY_WIDTH 320
-// #define DISPLAY_HEIGHT 240
-
-// // TCP 传输配置
-// #define DEFAULT_PORT 8888
-// #define DEFAULT_SERVER_IP "172.32.0.93"
-// #define HEADER_SIZE 32
-// #define CHUNK_SIZE 65536
-
-// // 帧率统计配置
-// #undef FPS_UPDATE_INTERVAL
-// #define FPS_UPDATE_INTERVAL 1000000 // 1秒 (微秒)
-
-// // 按键配置 (使用 DEV_Config.h 中已定义的 PIN)
-// // KEY0_PIN, KEY1_PIN, KEY2_PIN, KEY3_PIN 已在 DEV_Config.h 中定义
-
-// // GPIO 按键宏定义
-// #define GET_KEY0 DEV_Digital_Read(KEY0_PIN)
-// #define GET_KEY1 DEV_Digital_Read(KEY1_PIN)
-// #define GET_KEY2 DEV_Digital_Read(KEY2_PIN)
-// #define GET_KEY3 DEV_Digital_Read(KEY3_PIN)
-
-// // 配置文件路径
-// #define CONFIG_FILE_PATH "/root/Workspace/mxCamera_config.toml"
-
-// // ============================================================================
-// // 数据结构定义
-// // ============================================================================
-
 /**
  * @struct frame_header
  * @brief TCP传输数据帧头部结构
