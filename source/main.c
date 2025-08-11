@@ -55,8 +55,6 @@
 // 系统配置常量
 // ============================================================================
 
-
-
 // 摄像头配置 (默认值，可通过命令行参数覆盖)
 #define DEFAULT_CAMERA_WIDTH 1920
 #define DEFAULT_CAMERA_HEIGHT 1080
@@ -68,9 +66,9 @@
 static int camera_width = DEFAULT_CAMERA_WIDTH;
 static int camera_height = DEFAULT_CAMERA_HEIGHT;
 
-// 显示配置 (横屏模式)
-#define DISPLAY_WIDTH 320
-#define DISPLAY_HEIGHT 240
+// 显示配置 according to "fbtft_lcd.h"
+#define DISPLAY_WIDTH FBTFT_LCD_DEFAULT_WIDTH
+#define DISPLAY_HEIGHT FBTFT_LCD_DEFAULT_HEIGHT
 
 #define DISP_BUF_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT)
 
@@ -638,8 +636,8 @@ void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* d
     }
     
     // 确保最小尺寸
-    if (*dst_width < 160) *dst_width = 160;
-    if (*dst_height < 120) *dst_height = 120;
+    if (*dst_width < FBTFT_LCD_DEFAULT_WIDTH/2) *dst_width = FBTFT_LCD_DEFAULT_WIDTH/2;
+    if (*dst_height < FBTFT_LCD_DEFAULT_HEIGHT/2) *dst_height = FBTFT_LCD_DEFAULT_HEIGHT/2;
     
     // printf("Image scaling: %dx%d -> %dx%d (aspect ratio: %.3f)\n", 
     //        src_width, src_height, *dst_width, *dst_height, (double)aspect_ratio);
