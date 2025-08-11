@@ -49,12 +49,13 @@
 #include <sys/select.h>
 
 #include "mxCamera.h"
+#include "usb_config.h"  // USB配置管理
 
 // ============================================================================
 // 系统配置常量
 // ============================================================================
 
-#define DISP_BUF_SIZE (320 * 240)
+
 
 // 摄像头配置 (默认值，可通过命令行参数覆盖)
 #define DEFAULT_CAMERA_WIDTH 1920
@@ -71,6 +72,8 @@ static int camera_height = DEFAULT_CAMERA_HEIGHT;
 #define DISPLAY_WIDTH 320
 #define DISPLAY_HEIGHT 240
 
+#define DISP_BUF_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT)
+
 // TCP 传输配置 (参考 media_usb)
 #define DEFAULT_PORT 8888
 #define DEFAULT_SERVER_IP "172.32.0.93"
@@ -78,8 +81,8 @@ static int camera_height = DEFAULT_CAMERA_HEIGHT;
 #define CHUNK_SIZE 65536
 
 // 动态图像尺寸 (根据摄像头宽高比计算)
-static int current_img_width = 320;
-static int current_img_height = 240;
+static int current_img_width = DISPLAY_WIDTH;
+static int current_img_height = DISPLAY_HEIGHT;
 
 // 帧率统计配置 (重新定义以避免冲突)
 #undef FPS_UPDATE_INTERVAL
@@ -91,6 +94,10 @@ static int current_img_height = 240;
 #define CONFIG_MAX_KEY_LENGTH 64
 #define CONFIG_MAX_VALUE_LENGTH 128
 
+#define CONFIG_IMAGE_PATH "/mnt/ums/images"
+#define CONFIG_TIME_BASE_YEAR 1955
+#define CONFIG_TIME_BASE_MONTH 8
+#define CONFIG_TIME_BASE_DAY 5
 
 
 // ============================================================================
@@ -104,7 +111,7 @@ static volatile int display_enabled = 1;    // 图像显示开关状态 (KEY0控
 static volatile int tcp_enabled = 0;
 static volatile int screen_on = 1;          // 屏幕开关状态
 static volatile int menu_visible = 0;       // 设置菜单显示状态
-static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY, 2=EXPOSURE, 3=GAIN, 4=CLOSE)
+static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY, 2=EXPOSURE, 3=GAIN, 4=USB_CONFIG)
 static volatile int in_adjustment_mode = 0; // 是否在调整模式中
 static volatile int adjustment_type = 0;    // 调整类型 (0=exposure, 1=gain)
 static struct timeval last_activity_time;  // 最后活动时间
@@ -144,6 +151,7 @@ static lv_obj_t* menu_tcp_btn = NULL;  // TCP 按钮
 static lv_obj_t* menu_display_btn = NULL;  // DISPLAY 按钮
 static lv_obj_t* menu_exposure_btn = NULL;  // EXPOSURE 按钮
 static lv_obj_t* menu_gain_btn = NULL;      // GAIN 按钮
+static lv_obj_t* menu_usb_config_btn = NULL;  // USB CONFIG 按钮
 // static lv_obj_t* menu_close_btn = NULL;  // 关闭按钮
 
 // 帧率统计
@@ -619,14 +627,14 @@ void calculate_scaled_size(int src_width, int src_height, int* dst_width, int* d
     // 计算宽高比
     float aspect_ratio = (float)src_height / (float)src_width;
     
-    // 宽度固定为屏幕宽度320，高度根据宽高比计算
-    *dst_width = 320;  // 强制使用320像素宽度
-    *dst_height = (int)(320 * aspect_ratio);
+    // 宽度固定为屏幕宽度，高度根据宽高比计算
+    *dst_width = DISPLAY_WIDTH;  // 强制使用像素宽度
+    *dst_height = (int)(DISPLAY_WIDTH * aspect_ratio);
     
-    // 确保高度不超过屏幕高度240
-    if (*dst_height > 240) {
-        *dst_height = 240;
-        *dst_width = (int)(240 / aspect_ratio);
+    // 确保高度不超过屏幕高度 DISPLAY_HEIGHT
+    if (*dst_height > DISPLAY_HEIGHT) {
+        *dst_height = DISPLAY_HEIGHT;
+        *dst_width = (int)(DISPLAY_HEIGHT / aspect_ratio);
     }
     
     // 确保最小尺寸
@@ -891,7 +899,7 @@ void convert_pixels_to_rgb565(const uint16_t* pixels, uint16_t* rgb565_data,
  * @param src_buffer 源图像缓冲区
  * @param src_width 源图像宽度  
  * @param src_height 源图像高度
- * @param dst_buffer 目标全屏缓冲区 (320x240)
+ * @param dst_buffer 目标全屏缓冲区 (DISPLAY_WIDTH X DISPLAY_HEIGHT)
  * @return 0 成功，-1 失败
  */
 int landscape_image_fit(const uint16_t* src_buffer, int src_width, int src_height, 
@@ -1233,10 +1241,10 @@ void init_lvgl_ui(void) {
     lv_obj_t* scr = lv_disp_get_scr_act(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     
-    // 创建图像显示区域 (使用全屏尺寸320x240)
+    // 创建图像显示区域 (使用全屏尺寸 DISPLAY_WIDTH X DISPLAY_HEIGHT)
     img_canvas = lv_img_create(scr);
     lv_obj_set_pos(img_canvas, 0, 0);
-    lv_obj_set_size(img_canvas, 320, 240);  // 强制使用全屏尺寸
+    lv_obj_set_size(img_canvas, DISPLAY_WIDTH, DISPLAY_HEIGHT);  // 强制使用全屏尺寸
     
     // 创建系统信息标签 (左上角，显示帧率、CPU和内存占用)
     info_label = lv_label_create(scr);
@@ -1320,6 +1328,16 @@ void init_lvgl_ui(void) {
     lv_obj_set_style_pad_all(menu_gain_btn, 4, 0);
     lv_obj_align(menu_gain_btn, LV_ALIGN_TOP_MID, 0, 110);
     
+    // USB CONFIG 选项标签
+    menu_usb_config_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_usb_config_btn, "  USB: ADB");
+    lv_obj_set_style_text_color(menu_usb_config_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_usb_config_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_usb_config_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_usb_config_btn, 4, 0);
+    lv_obj_align(menu_usb_config_btn, LV_ALIGN_TOP_MID, 0, 135);
+    
     // 初始化时间更新时间戳
     gettimeofday(&last_time_update, NULL);
     
@@ -1386,13 +1404,13 @@ int main(int argc, char* argv[]) {
     static lv_disp_draw_buf_t disp_buf;
     lv_disp_draw_buf_init(&disp_buf, buf, NULL, DISP_BUF_SIZE);
     
-    // 注册显示驱动 (强制横屏模式: 320x240)
+    // 注册显示驱动 (强制横屏模式: DISPLAY_WIDTH X DISPLAY_HEIGHT)
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
     disp_drv.draw_buf = &disp_buf;
     disp_drv.flush_cb = fbdev_flush;
-    disp_drv.hor_res = 320;  // 强制设置横屏宽度
-    disp_drv.ver_res = 240;  // 强制设置横屏高度
+    disp_drv.hor_res = DISPLAY_WIDTH;  // 强制设置横屏宽度
+    disp_drv.ver_res = DISPLAY_HEIGHT;  // 强制设置横屏高度
     
     // 尝试设置旋转（如果支持）
     // disp_drv.rotated = LV_DISP_ROT_90;  // 如果需要旋转90度
@@ -1459,6 +1477,14 @@ int main(int argc, char* argv[]) {
     // 初始化曝光和增益控制
     init_camera_controls();
     
+    // 初始化USB配置模块
+    printf("Initializing USB configuration module...\n");
+    if (init_usb_config() == 0) {
+        printf("USB configuration module initialized\n");
+    } else {
+        printf("Warning: USB configuration module initialization failed\n");
+    }
+    
     // 如果配置文件已加载，应用曝光和增益值到硬件
     if (config_loaded) {
         printf("Applying loaded configuration to camera hardware...\n");
@@ -1481,9 +1507,9 @@ int main(int argc, char* argv[]) {
     }
     
     printf("System initialized successfully\n");
-    printf("Display: 320x240 (forced landscape mode)\n");
+    printf("Display: %dx%d (forced landscape mode)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     printf("Camera: %dx%d (RAW10) on %s\n", camera_width, camera_height, DEFAULT_CAMERA_DEVICE);
-    printf("Scaling: Width-aligned to 320px, maintaining aspect ratio\n");
+    printf("Scaling: Width-aligned to %d px, maintaining aspect ratio\n", DISPLAY_WIDTH);
     printf("Performance optimizations enabled:\n");
     printf("  - Display update rate limited to 30 FPS\n");
     printf("  - Non-blocking frame mutex for better key response\n");
@@ -1654,6 +1680,10 @@ cleanup:
     // 清理 INA219 电池监测
     cleanup_ina219();
 
+    // 清理USB配置模块
+    printf("Cleaning up USB configuration...\n");
+    cleanup_usb_config();
+
     // 清理 GPIO
     printf("Cleaning up GPIO...\n");
     DEV_ModuleExit();
@@ -1794,7 +1824,7 @@ void hide_settings_menu(void) {
  * @brief 更新菜单选择状态的视觉显示
  */
 void update_menu_selection(void) {
-    if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn) return;
+    if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn || !menu_usb_config_btn) return;
     
     // 重置所有选项的背景
    
@@ -1807,29 +1837,44 @@ void update_menu_selection(void) {
     lv_obj_set_style_bg_opa(menu_exposure_btn, LV_OPA_30, 0);
     lv_obj_set_style_bg_color(menu_gain_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_usb_config_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_30, 0);
     
     // 更新文本内容
     char tcp_text[32];
     char display_text[32];
     char exposure_text[32];
     char gain_text[32];
+    char usb_text[32];
     
-    snprintf(tcp_text, sizeof(tcp_text), "  TCP: %s", tcp_enabled ? "ON" : "OFF");
+    // TCP状态根据USB模式动态显示
+    if (is_tcp_available()) {
+        snprintf(tcp_text, sizeof(tcp_text), "  TCP: %s", tcp_enabled ? "ON" : "OFF");
+    } else {
+        snprintf(tcp_text, sizeof(tcp_text), "  TCP: N/A");
+    }
+    
     snprintf(display_text, sizeof(display_text), "  DISPLAY: %s", display_enabled ? "ON" : "OFF");
     snprintf(exposure_text, sizeof(exposure_text), "  EXPOSURE: %d", current_exposure);
     snprintf(gain_text, sizeof(gain_text), "  GAIN: %d", current_gain);
+    snprintf(usb_text, sizeof(usb_text), "  USB: %s", get_usb_mode_name(get_usb_mode()));
     
     lv_label_set_text(menu_tcp_btn, tcp_text);
     lv_label_set_text(menu_display_btn, display_text);
     lv_label_set_text(menu_exposure_btn, exposure_text);
     lv_label_set_text(menu_gain_btn, gain_text);
+    lv_label_set_text(menu_usb_config_btn, usb_text);
     
     // 高亮当前选择的项目
     switch (menu_selected_item) {
         case 0: // TCP
             lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(60, 60, 60), 0);
             lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_70, 0);
-            snprintf(tcp_text, sizeof(tcp_text), "> TCP: %s", tcp_enabled ? "ON" : "OFF");
+            if (is_tcp_available()) {
+                snprintf(tcp_text, sizeof(tcp_text), "> TCP: %s", tcp_enabled ? "ON" : "OFF");
+            } else {
+                snprintf(tcp_text, sizeof(tcp_text), "> TCP: N/A");
+            }
             lv_label_set_text(menu_tcp_btn, tcp_text);
             break;
         case 1: // DISPLAY
@@ -1858,6 +1903,12 @@ void update_menu_selection(void) {
             }
             lv_label_set_text(menu_gain_btn, gain_text);
             break;
+        case 4: // USB CONFIG
+            lv_obj_set_style_bg_color(menu_usb_config_btn, lv_color_make(60, 60, 60), 0);
+            lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_70, 0);
+            snprintf(usb_text, sizeof(usb_text), "> USB: %s", get_usb_mode_name(get_usb_mode()));
+            lv_label_set_text(menu_usb_config_btn, usb_text);
+            break;
     }
 }
 
@@ -1878,7 +1929,7 @@ void menu_navigate_up(void) {
         // 普通导航模式
         menu_selected_item--;
         if (menu_selected_item < 0) {
-            menu_selected_item = 3; // 循环到最后一项 (GAIN)
+            menu_selected_item = 4; // 循环到最后一项 (USB_CONFIG)
         }
         update_menu_selection();
         printf("Menu navigation UP, selected item: %d\n", menu_selected_item);
@@ -1901,7 +1952,7 @@ void menu_navigate_down(void) {
     } else {
         // 普通导航模式
         menu_selected_item++;
-        if (menu_selected_item > 3) {
+        if (menu_selected_item > 4) {
             menu_selected_item = 0; // 循环到第一项 (TCP)
         }
         update_menu_selection();
@@ -1917,6 +1968,13 @@ void menu_confirm_selection(void) {
     
     switch (menu_selected_item) {
         case 0: // TCP 选项
+            // 检查TCP是否可用（只有RNDIS模式下才可用）
+            if (!is_tcp_available() && !tcp_enabled) {
+                printf("Menu: TCP not available in current USB mode (%s). Switch to RNDIS mode first.\n", 
+                       get_usb_mode_name(get_usb_mode()));
+                break;
+            }
+            
             tcp_enabled = !tcp_enabled;
             printf("Menu: TCP transmission %s\n", tcp_enabled ? "ENABLED" : "DISABLED");
             
@@ -2015,6 +2073,28 @@ void menu_confirm_selection(void) {
                 in_adjustment_mode = 1;
                 adjustment_type = 1; // 增益调整
                 printf("Menu: Entering gain adjustment mode (UP/DOWN to adjust, KEY3 to exit)\n");
+            }
+            break;
+            
+        case 4: // USB CONFIG 选项
+            {
+                usb_mode_t current_mode = get_usb_mode();
+                usb_mode_t next_mode = get_next_usb_mode(current_mode);
+                
+                printf("Menu: Switching USB mode from %s to %s\n", 
+                       get_usb_mode_name(current_mode), get_usb_mode_name(next_mode));
+                
+                if (set_usb_mode(next_mode) == 0) {
+                    printf("Menu: USB mode changed to %s\n", get_usb_mode_name(next_mode));
+                    
+                    // 检查TCP是否仍然可用
+                    if (!is_tcp_available() && tcp_enabled) {
+                        tcp_enabled = 0;
+                        printf("Menu: TCP disabled due to USB mode change (TCP only available in RNDIS mode)\n");
+                    }
+                } else {
+                    printf("Menu: Failed to change USB mode\n");
+                }
             }
             break;
     }
@@ -2233,21 +2313,9 @@ void cleanup_camera_controls(void) {
  */
 int create_images_directory(void) {
     // 创建根目录
-    if (mkdir("/root/images", 0755) != 0 && errno != EEXIST) {
-        printf("Error: Failed to create /root/images directory: %s\n", strerror(errno));
+    if (mkdir(CONFIG_IMAGE_PATH, 0755) != 0 && errno != EEXIST) {
+        printf("Error: Failed to create %s directory: %s\n", CONFIG_IMAGE_PATH, strerror(errno));
         return -1;
-    }
-    
-    // 创建按日期分类的子目录
-    time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    
-    char date_dir[128];
-    strftime(date_dir, sizeof(date_dir), "/root/images/%Y-%m-%d", tm_info);
-    
-    if (mkdir(date_dir, 0755) != 0 && errno != EEXIST) {
-        printf("Warning: Failed to create date directory %s: %s\n", date_dir, strerror(errno));
-        // 仍然继续，使用根目录
     }
     
     return 0;
@@ -2266,10 +2334,13 @@ char* generate_photo_filename(void) {
     strftime(timestamp, sizeof(timestamp), "%H-%M-%S", tm_info);
     
     // 构建包含分辨率的文件名，使用 .bin 扩展名表示16位解包数据
-    snprintf(filename, sizeof(filename), "/root/images/%04d-%02d-%02d/%s_%dx%d_16bit.bin",
-             tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+    snprintf(filename, sizeof(filename), "%s/%04d-%02d-%02d_%s_%dx%d_16bit.bin",
+             CONFIG_IMAGE_PATH,
+             tm_info->tm_year + CONFIG_TIME_BASE_YEAR,
+              tm_info->tm_mon + CONFIG_TIME_BASE_MONTH,
+               tm_info->tm_mday + CONFIG_TIME_BASE_DAY,
              timestamp, camera_width, camera_height);
-    
+
     return filename;
 }
 

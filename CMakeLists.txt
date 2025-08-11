@@ -217,8 +217,13 @@ add_compile_options(${COMMON_FLAGS})
 
 # 收集项目源文件
 file(GLOB PROJECT_SOURCES 
-    "${PROJECT_SOURCE_DIR}/*.c"
+    "source/*.c"
 )
+
+# 打印源文件列表以调试
+message(STATUS "项目源文件: ${PROJECT_SOURCES}")
+message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
+message(STATUS "CMAKE_CURRENT_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
 
 # 创建可执行文件
 add_executable(${PROJECT_NAME} ${PROJECT_SOURCES})
