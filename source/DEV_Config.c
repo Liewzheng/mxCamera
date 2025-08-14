@@ -1,21 +1,6 @@
-/*****************************************************************************
-* | File      	:   DEV_Config.c
-* | Author      :   Luckfox team
-* | Function    :   Hardware underlying interface
-* | Info        :
-*----------------
-* |	This version:   V2.0
-* | Date        :   2019-07-08
-* | Info        :   Basic version
-*
-******************************************************************************/
 #include "DEV_Config.h"
 #include <gpio.h>
 
-
-/*****************************************
-                GPIO
-*****************************************/
 void DEV_Digital_Write(UWORD Pin, UBYTE Value)
 {
     int result = libgpio_write(Pin, Value);
@@ -54,9 +39,6 @@ void DEV_GPIO_Mode(UWORD Pin, UWORD Mode)
     }
 }
 
-/**
- * Configure GPIO input with pull-up resistor
- */
 void DEV_GPIO_Mode_PullUp(UWORD Pin)
 {
     // 尝试导出 GPIO（即使失败也继续）
@@ -70,9 +52,6 @@ void DEV_GPIO_Mode_PullUp(UWORD Pin)
     }
 }
 
-/**
- * delay x ms
-**/
 void DEV_Delay_ms(UDOUBLE xms)
 {
     UDOUBLE i;
@@ -112,38 +91,14 @@ static void DEV_GPIO_Init(void)
     DEV_Digital_Write(KEY_RIGHT_PIN, 1); // 设置为高电平（上拉）
     printf("KEY_RIGHT_PIN (%d) initialized as input with pull-up\n", KEY_RIGHT_PIN);
 #endif
-    
-    // LCD 控制引脚初始化 (输出模式)
-    DEV_GPIO_Mode(LCD_CS_PIN, 1);      // 片选信号
-    DEV_GPIO_Mode(LCD_RST_PIN, 1);     // 复位信号
-    DEV_GPIO_Mode(LCD_DC_PIN, 1);      // 数据/命令选择
-    DEV_GPIO_Mode(LCD_BL_PIN, 1);      // 背光控制
-    
-    // 初始化 LCD 控制信号状态
-    LCD_CS(1);      // 取消片选
-    LCD_RST(1);     // 释放复位
-    LCD_DC(1);      // 默认数据模式
-    LCD_BL(1);      // 开启背光
-    
-    printf("LCD pins initialized\n");
 }
 
-/******************************************************************************
-function:	Module Initialize, the library and initialize the pins, SPI protocol
-parameter:
-Info:
-******************************************************************************/
 UBYTE DEV_ModuleInit(void)
 {
     DEV_GPIO_Init();
     return 0;
 }
 
-/******************************************************************************
-function:	Module cleanup, release GPIO resources
-parameter:
-Info:
-******************************************************************************/
 void DEV_ModuleExit(void)
 {
     printf("Cleaning up GPIO resources...\n");
@@ -164,11 +119,6 @@ void DEV_ModuleExit(void)
     libgpio_unexport(KEY_RIGHT_PIN);
 #endif
 
-    libgpio_unexport(LCD_CS_PIN);
-    libgpio_unexport(LCD_RST_PIN);
-    libgpio_unexport(LCD_DC_PIN);
-    libgpio_unexport(LCD_BL_PIN);
-    
     // 清理 libgpio 库
     libgpio_deinit();
     
