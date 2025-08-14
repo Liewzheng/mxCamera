@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <ctype.h>
+#include <stdbool.h>
 
 // 库头文件
 #include <gpio.h>
@@ -1101,11 +1102,14 @@ void handle_keys(void) {
     static int last_key1_state = 1;
     static int last_key2_state = 1;
     static int last_key3_state = 1;
+    static int last_keyx_state = 1;
     static int key0_debounce_count = 0;
     static int key1_debounce_count = 0;
     static int key2_debounce_count = 0;
     static int key3_debounce_count = 0;
     static struct timeval last_key_check = {0};
+    static struct timeval keyx_press_start = {0};
+    static bool keyx_long_press_triggered = false;
     const int debounce_threshold = 3;
     
     // 限制按键检查频率
@@ -1124,10 +1128,11 @@ void handle_keys(void) {
     int current_key1 = GET_KEY1;
     int current_key2 = GET_KEY2;
     int current_key3 = GET_KEY3;
+    int current_keyx = GET_KEYX;
     
     // 检查任意按键是否被按下（屏幕唤醒）
     int any_key_pressed = (current_key0 == 0) || (current_key1 == 0) || 
-                          (current_key2 == 0) || (current_key3 == 0);
+                          (current_key2 == 0) || (current_key3 == 0) || (current_keyx == 0);
     
     if (any_key_pressed && !screen_on) {
         turn_screen_on();
@@ -1223,6 +1228,31 @@ void handle_keys(void) {
             }
             last_key3_state = current_key3;
             key3_debounce_count = 0;
+        }
+    }
+    
+    // KEYX 长按检测处理 (长按3秒触发关机)
+    if (current_keyx != last_keyx_state) {
+        last_keyx_state = current_keyx;
+        if (current_keyx == 0) {
+            // KEYX 按键按下，记录按下时间
+            gettimeofday(&keyx_press_start, NULL);
+            keyx_long_press_triggered = false;
+            printf("KEYX pressed, starting long press timer...\n");
+        } else {
+            // KEYX 按键释放，重置状态
+            keyx_long_press_triggered = false;
+            printf("KEYX released\n");
+        }
+    } else if (current_keyx == 0 && !keyx_long_press_triggered) {
+        // KEYX 持续按下，检查是否超过3秒
+        long press_duration = (current_time.tv_sec - keyx_press_start.tv_sec) * 1000000 +
+                             (current_time.tv_usec - keyx_press_start.tv_usec);
+
+        if (press_duration >= 3000000) { // 3秒 = 3,000,000 微秒
+            keyx_long_press_triggered = true;
+            
+            system("poweroff"); // 执行关机命令
         }
     }
 }
