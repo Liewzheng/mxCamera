@@ -158,14 +158,13 @@ static lv_obj_t* info_label = NULL;
 // static lv_obj_t* tcp_label = NULL;
 static lv_obj_t* time_label = NULL;  // 时间显示标签
 static lv_obj_t* subsys_panel = NULL;    // 子系统状态面板
-static lv_obj_t* laser_icon = NULL;      // 激光图标
-static lv_obj_t* pump_icon = NULL;       // 气泵图标
-static lv_obj_t* heater1_icon = NULL;    // 加热器1图标
-static lv_obj_t* heater2_icon = NULL;    // 加热器2图标
-static lv_obj_t* laser_label = NULL;     // 激光状态标签
-static lv_obj_t* pump_label = NULL;      // 气泵状态标签
-static lv_obj_t* heater1_label = NULL;   // 加热器1状态标签
-static lv_obj_t* heater2_label = NULL;   // 加热器2状态标签
+static lv_obj_t* laser_status_label = NULL;   // 激光状态标签
+static lv_obj_t* pump_status_label = NULL;    // 气泵状态标签
+static lv_obj_t* heater1_status_label = NULL; // 加热器1状态标签
+static lv_obj_t* heater2_status_label = NULL; // 加热器2状态标签
+static lv_obj_t* separator1_label = NULL;     // 分隔符1
+static lv_obj_t* separator2_label = NULL;     // 分隔符2
+static lv_obj_t* separator3_label = NULL;     // 分隔符3
 static lv_obj_t* menu_panel = NULL;  // 设置菜单面板
 static lv_obj_t* menu_tcp_btn = NULL;  // TCP 按钮
 static lv_obj_t* menu_display_btn = NULL;  // DISPLAY 按钮
@@ -446,72 +445,81 @@ void cleanup_subsystem(void) {
  * @brief 更新子系统状态显示
  */
 void update_subsys_status_display(void) {
-    if (!laser_icon || !pump_icon || !heater1_icon || !heater2_icon ||
-        !laser_label || !pump_label || !heater1_label || !heater2_label) {
+    // 检查所有标签是否已创建
+    if (!laser_status_label || !pump_status_label || !heater1_status_label || !heater2_status_label) {
         return;
     }
     
     // 如果子系统不可用，所有显示为灰色
     if (!subsys_available) {
-        lv_color_t gray_color = lv_color_make(128, 128, 128);
+        const uint8_t r = 64, g = 64, b= 64;
+        lv_obj_set_style_text_color(laser_status_label, lv_color_make(r, g, b), 0);
+        lv_obj_set_style_text_color(pump_status_label, lv_color_make(r, g, b), 0);
+        lv_obj_set_style_text_color(heater1_status_label, lv_color_make(r, g, b), 0);
+        lv_obj_set_style_text_color(heater2_status_label, lv_color_make(r, g, b), 0);
         
-        // 图标变灰色
-        lv_obj_set_style_img_recolor(laser_icon, gray_color, 0);
-        lv_obj_set_style_img_recolor(pump_icon, gray_color, 0);
-        lv_obj_set_style_img_recolor(heater1_icon, gray_color, 0);
-        lv_obj_set_style_img_recolor(heater2_icon, gray_color, 0);
+        // 分隔符也设置为灰色
+        lv_obj_set_style_text_color(separator1_label, lv_color_make(r, g, b), 0);
+        lv_obj_set_style_text_color(separator2_label, lv_color_make(r, g, b), 0);
+        lv_obj_set_style_text_color(separator3_label, lv_color_make(r, g, b), 0);
         
-        // 标签变灰色
-        lv_obj_set_style_text_color(laser_label, gray_color, 0);
-        lv_obj_set_style_text_color(pump_label, gray_color, 0);
-        lv_obj_set_style_text_color(heater1_label, gray_color, 0);
-        lv_obj_set_style_text_color(heater2_label, gray_color, 0);
-        
-        // 更新文本内容
-        lv_label_set_text(heater1_label, "热片1:离线");
-        lv_label_set_text(heater2_label, "热片2:离线");
-        
+        lv_label_set_text(laser_status_label, "L");
+        lv_label_set_text(pump_status_label, "P");
+        lv_label_set_text(heater1_status_label, "H1:离线");
+        lv_label_set_text(heater2_status_label, "H2:离线");
         return;
     }
     
-    // 子系统可用时的正常显示
-    // 更新激光状态显示
-    lv_color_t laser_color = (device_info.laser_status == SUBSYS_STATUS_ON) ? 
-                            lv_color_make(255, 100, 100) : lv_color_white();
-    lv_obj_set_style_img_recolor(laser_icon, laser_color, 0);
-    lv_obj_set_style_text_color(laser_label, laser_color, 0);
+    // 通信正常时，分隔符恢复为白色
+    lv_obj_set_style_text_color(separator1_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(separator2_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(separator3_label, lv_color_white(), 0);
     
-    // 更新气泵状态显示
-    lv_color_t pump_color = (device_info.pump_status == SUBSYS_STATUS_ON) ? 
-                           lv_color_make(255, 100, 100) : lv_color_white();
-    lv_obj_set_style_img_recolor(pump_icon, pump_color, 0);
-    lv_obj_set_style_text_color(pump_label, pump_color, 0);
+    // 激光器状态（红色=开启，白色=关闭）
+    if (device_info.laser_status == SUBSYS_STATUS_ON) {
+        lv_obj_set_style_text_color(laser_status_label, lv_color_make(255, 0, 0), 0);
+    } else {
+        lv_obj_set_style_text_color(laser_status_label, lv_color_white(), 0);
+    }
+    lv_label_set_text(laser_status_label, "L");
     
-    // 更新加热器1状态显示
+    // 气泵状态（红色=开启，白色=关闭）
+    if (device_info.pump_status == SUBSYS_STATUS_ON) {
+        lv_obj_set_style_text_color(pump_status_label, lv_color_make(255, 0, 0), 0);
+    } else {
+        lv_obj_set_style_text_color(pump_status_label, lv_color_white(), 0);
+    }
+    lv_label_set_text(pump_status_label, "P");
+    
+    // 加热器1状态和温度
     char heater1_text[32];
     if (device_info.temp1_valid) {
-        snprintf(heater1_text, sizeof(heater1_text), "热片1:%.1f°C", (double)device_info.temp1);
+        snprintf(heater1_text, sizeof(heater1_text), "H1:%.2f°C", (double)device_info.temp1);
     } else {
-        snprintf(heater1_text, sizeof(heater1_text), "热片1:--°C");
+        snprintf(heater1_text, sizeof(heater1_text), "H1:--°C");
     }
-    lv_label_set_text(heater1_label, heater1_text);
-    lv_color_t heater1_color = (device_info.heater1_status == SUBSYS_STATUS_ON) ? 
-                              lv_color_make(255, 100, 100) : lv_color_white();
-    lv_obj_set_style_img_recolor(heater1_icon, heater1_color, 0);
-    lv_obj_set_style_text_color(heater1_label, heater1_color, 0);
     
-    // 更新加热器2状态显示
+    if (device_info.heater1_status == SUBSYS_STATUS_ON) {
+        lv_obj_set_style_text_color(heater1_status_label, lv_color_make(255, 0, 0), 0);
+    } else {
+        lv_obj_set_style_text_color(heater1_status_label, lv_color_white(), 0);
+    }
+    lv_label_set_text(heater1_status_label, heater1_text);
+    
+    // 加热器2状态和温度
     char heater2_text[32];
     if (device_info.temp2_valid) {
-        snprintf(heater2_text, sizeof(heater2_text), "热片2:%.1f°C", (double)device_info.temp2);
+        snprintf(heater2_text, sizeof(heater2_text), "H2:%.2f°C", (double)device_info.temp2);
     } else {
-        snprintf(heater2_text, sizeof(heater2_text), "热片2:--°C");
+        snprintf(heater2_text, sizeof(heater2_text), "H2:--°C");
     }
-    lv_label_set_text(heater2_label, heater2_text);
-    lv_color_t heater2_color = (device_info.heater2_status == SUBSYS_STATUS_ON) ? 
-                              lv_color_make(255, 100, 100) : lv_color_white();
-    lv_obj_set_style_img_recolor(heater2_icon, heater2_color, 0);
-    lv_obj_set_style_text_color(heater2_label, heater2_color, 0);
+    
+    if (device_info.heater2_status == SUBSYS_STATUS_ON) {
+        lv_obj_set_style_text_color(heater2_status_label, lv_color_make(255, 0, 0), 0);
+    } else {
+        lv_obj_set_style_text_color(heater2_status_label, lv_color_white(), 0);
+    }
+    lv_label_set_text(heater2_status_label, heater2_text);
 }
 
 /**
@@ -845,6 +853,7 @@ void turn_screen_off(void) {
     if (img_canvas) lv_obj_add_flag(img_canvas, LV_OBJ_FLAG_HIDDEN);
     if (info_label) lv_obj_add_flag(info_label, LV_OBJ_FLAG_HIDDEN);
     if (time_label) lv_obj_add_flag(time_label, LV_OBJ_FLAG_HIDDEN);
+    if (subsys_panel) lv_obj_add_flag(subsys_panel, LV_OBJ_FLAG_HIDDEN);
     if (menu_panel) {
         lv_obj_add_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
         menu_visible = 0; // 重置菜单状态
@@ -1654,73 +1663,64 @@ void init_lvgl_ui(void) {
     
     // 创建子系统状态面板 (屏幕底部)
     subsys_panel = lv_obj_create(scr);
-    lv_obj_set_size(subsys_panel, DISPLAY_WIDTH, 30);
-    lv_obj_align(subsys_panel, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(subsys_panel, lv_color_make(0, 0, 0), 0);
-    lv_obj_set_style_bg_opa(subsys_panel, LV_OPA_70, 0);
-    lv_obj_set_style_border_width(subsys_panel, 0, 0);
-    lv_obj_set_style_pad_all(subsys_panel, 2, 0);
-    
-    // 创建子系统状态面板
-    subsys_panel = lv_obj_create(scr);
-    lv_obj_set_size(subsys_panel, DISPLAY_WIDTH, 50);  // 增加高度以容纳图标
+    lv_obj_set_size(subsys_panel, DISPLAY_WIDTH, 30);  // 减小高度，只需要一行文字
     lv_obj_align(subsys_panel, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(subsys_panel, lv_color_make(0, 0, 0), 0);
     lv_obj_set_style_bg_opa(subsys_panel, LV_OPA_70, 0);
     lv_obj_set_style_border_width(subsys_panel, 0, 0);
     lv_obj_set_style_pad_all(subsys_panel, 5, 0);
     
-    // 激光图标和标签
-    laser_icon = lv_img_create(subsys_panel);
-    lv_img_set_src(laser_icon, "A:icon/laser.png");
-    lv_obj_align(laser_icon, LV_ALIGN_LEFT_MID, 10, -10);
-    lv_obj_set_style_img_recolor_opa(laser_icon, LV_OPA_COVER, 0);
-    lv_obj_set_style_img_recolor(laser_icon, lv_color_white(), 0);
+    // 禁用滚动条
+    lv_obj_clear_flag(subsys_panel, LV_OBJ_FLAG_SCROLLABLE);
     
-    laser_label = lv_label_create(subsys_panel);
-    lv_label_set_text(laser_label, "激光");
-    lv_obj_set_style_text_color(laser_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(laser_label, &lv_font_montserrat_12, 0);
-    lv_obj_align_to(laser_label, laser_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    // 创建激光器状态标签
+    laser_status_label = lv_label_create(subsys_panel);
+    lv_label_set_text(laser_status_label, "L");
+    lv_obj_set_style_text_color(laser_status_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(laser_status_label, &lv_font_montserrat_12, 0);
+    lv_obj_align(laser_status_label, LV_ALIGN_LEFT_MID, 10, 0);
     
-    // 气泵图标和标签
-    pump_icon = lv_img_create(subsys_panel);
-    lv_img_set_src(pump_icon, "A:icon/pump.png");
-    lv_obj_align(pump_icon, LV_ALIGN_LEFT_MID, 80, -10);
-    lv_obj_set_style_img_recolor_opa(pump_icon, LV_OPA_COVER, 0);
-    lv_obj_set_style_img_recolor(pump_icon, lv_color_white(), 0);
+    // 创建第一个分隔符
+    separator1_label = lv_label_create(subsys_panel);
+    lv_label_set_text(separator1_label, "/");
+    lv_obj_set_style_text_color(separator1_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(separator1_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(separator1_label, laser_status_label, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     
-    pump_label = lv_label_create(subsys_panel);
-    lv_label_set_text(pump_label, "泵");
-    lv_obj_set_style_text_color(pump_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(pump_label, &lv_font_montserrat_12, 0);
-    lv_obj_align_to(pump_label, pump_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    // 创建气泵状态标签
+    pump_status_label = lv_label_create(subsys_panel);
+    lv_label_set_text(pump_status_label, "P");
+    lv_obj_set_style_text_color(pump_status_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(pump_status_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(pump_status_label, separator1_label, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     
-    // 加热器1图标和标签
-    heater1_icon = lv_img_create(subsys_panel);
-    lv_img_set_src(heater1_icon, "A:icon/heater.png");
-    lv_obj_align(heater1_icon, LV_ALIGN_LEFT_MID, 150, -10);
-    lv_obj_set_style_img_recolor_opa(heater1_icon, LV_OPA_COVER, 0);
-    lv_obj_set_style_img_recolor(heater1_icon, lv_color_white(), 0);
+    // 创建第二个分隔符
+    separator2_label = lv_label_create(subsys_panel);
+    lv_label_set_text(separator2_label, "/");
+    lv_obj_set_style_text_color(separator2_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(separator2_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(separator2_label, pump_status_label, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     
-    heater1_label = lv_label_create(subsys_panel);
-    lv_label_set_text(heater1_label, "热片1:--°C");
-    lv_obj_set_style_text_color(heater1_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(heater1_label, &lv_font_montserrat_12, 0);
-    lv_obj_align_to(heater1_label, heater1_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    // 创建加热器1状态标签
+    heater1_status_label = lv_label_create(subsys_panel);
+    lv_label_set_text(heater1_status_label, "H1:--°C");
+    lv_obj_set_style_text_color(heater1_status_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(heater1_status_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(heater1_status_label, separator2_label, LV_ALIGN_OUT_RIGHT_MID, 5, 0);
     
-    // 加热器2图标和标签
-    heater2_icon = lv_img_create(subsys_panel);
-    lv_img_set_src(heater2_icon, "A:icon/heater.png");
-    lv_obj_align(heater2_icon, LV_ALIGN_LEFT_MID, 240, -10);
-    lv_obj_set_style_img_recolor_opa(heater2_icon, LV_OPA_COVER, 0);
-    lv_obj_set_style_img_recolor(heater2_icon, lv_color_white(), 0);
+    // 创建第三个分隔符
+    separator3_label = lv_label_create(subsys_panel);
+    lv_label_set_text(separator3_label, "/");
+    lv_obj_set_style_text_color(separator3_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(separator3_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(separator3_label, heater1_status_label, LV_ALIGN_OUT_RIGHT_MID, 25, 0);
     
-    heater2_label = lv_label_create(subsys_panel);
-    lv_label_set_text(heater2_label, "热片2:--°C");
-    lv_obj_set_style_text_color(heater2_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(heater2_label, &lv_font_montserrat_12, 0);
-    lv_obj_align_to(heater2_label, heater2_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    // 创建加热器2状态标签
+    heater2_status_label = lv_label_create(subsys_panel);
+    lv_label_set_text(heater2_status_label, "H2:--°C");
+    lv_obj_set_style_text_color(heater2_status_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(heater2_status_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(heater2_status_label, separator3_label, LV_ALIGN_OUT_RIGHT_MID, 10, 0);
     
     // 初始化时间更新时间戳
     gettimeofday(&last_time_update, NULL);
