@@ -13,3 +13,6 @@
 [submodule "libstaging"]
 	path = libstaging
 	url = https://github.com/Liewzheng/libstaging_for_luckfox_pico
+[submodule "libsubsys"]
+	path = libsubsys
+	url = https://github.com/Liewzheng/libsubsys_for_luckfox_pico
