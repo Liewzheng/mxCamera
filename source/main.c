@@ -34,6 +34,7 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <linux/videodev2.h>
 
 // 库头文件
 #include <gpio.h>
@@ -252,6 +253,11 @@ void signal_handler(int sig) {
 // 子系统通信函数
 // ============================================================================
 
+// 函数原型声明
+void* auto_control_thread(void* arg);
+void start_auto_control_mode(void);
+void stop_auto_control_mode(void);
+
 /**
  * @brief 初始化子系统通信
  * @return 0=成功，-1=失败
@@ -410,11 +416,128 @@ void stop_subsys_monitor(void) {
     pthread_join(subsys_thread_id, NULL);
 }
 
+// 自动控制状态
+static bool auto_control_running = false;        // 自动控制是否正在运行
+static pthread_t auto_control_thread_id;         // 自动控制线程ID
+static volatile int auto_control_thread_running = 0; // 自动控制线程运行状态
+
+/**
+ * @brief 自动控制线程 - 气泵持续运行，激光间隔1.5秒开启1.5秒
+ */
+void* auto_control_thread(void* arg) {
+    (void)arg;
+    
+    printf("自动控制线程已启动\n");
+    
+    // 首先启动气泵
+    if (subsys_available && subsys_handle) {
+        if (subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, true) == 0) {
+            printf("自动控制：气泵已启动（持续运行）\n");
+        }
+    }
+    
+    while (auto_control_thread_running && !exit_flag) {
+        if (!subsys_available || !subsys_handle) {
+            sleep(1);
+            continue;
+        }
+        
+        // 等待1.5秒（激光关闭时间）
+        printf("自动控制：激光关闭，等待1.5秒...\n");
+        sleep(1);
+        usleep(500000); // 0.5秒
+        
+        if (!auto_control_thread_running || exit_flag) break;
+        
+        // 开启激光
+        if (subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, true) == 0) {
+            printf("自动控制：激光开启\n");
+        }
+        
+        // 等待1.5秒（激光开启时间）
+        printf("自动控制：激光开启，持续1.5秒...\n");
+        sleep(1);
+        usleep(500000); // 0.5秒
+        
+        if (!auto_control_thread_running || exit_flag) break;
+        
+        // 关闭激光
+        if (subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false) == 0) {
+            printf("自动控制：激光关闭\n");
+        }
+    }
+    
+    // 清理：关闭所有设备
+    if (subsys_available && subsys_handle) {
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+        printf("自动控制：所有设备已关闭\n");
+    }
+    
+    printf("自动控制线程已退出\n");
+    return NULL;
+}
+
+/**
+ * @brief 启动自动控制模式（手动调用）
+ */
+void start_auto_control_mode(void) {
+    if (!subsys_available || !subsys_handle) {
+        printf("无法启动自动控制：子系统不可用\n");
+        return;
+    }
+    
+    if (auto_control_running) {
+        printf("自动控制已在运行中\n");
+        return;
+    }
+    
+    printf("启动自动控制模式：气泵持续运行，激光间隔1.5秒开启1.5秒\n");
+    
+    auto_control_thread_running = 1;
+    auto_control_running = true;
+    
+    if (pthread_create(&auto_control_thread_id, NULL, auto_control_thread, NULL) != 0) {
+        printf("错误: 创建自动控制线程失败\n");
+        auto_control_thread_running = 0;
+        auto_control_running = false;
+        return;
+    }
+    
+    printf("自动控制模式启动成功\n");
+}
+
+/**
+ * @brief 停止自动控制模式
+ */
+void stop_auto_control_mode(void) {
+    if (!auto_control_running) {
+        printf("自动控制未运行\n");
+        return;
+    }
+    
+    printf("停止自动控制模式...\n");
+    
+    auto_control_thread_running = 0;
+    
+    // 等待线程结束
+    pthread_join(auto_control_thread_id, NULL);
+    
+    auto_control_running = false;
+    
+    printf("自动控制模式已停止\n");
+}
+
 /**
  * @brief 清理子系统资源
  */
 void cleanup_subsystem(void) {
     printf("清理子系统资源...\n");
+    
+    // 停止自动控制线程
+    if (auto_control_running) {
+        stop_auto_control_mode();
+    }
     
     // 停止监控线程
     stop_subsys_monitor();
@@ -1447,9 +1570,10 @@ void handle_keys(void) {
                 if (menu_visible) {
                     menu_navigate_up();
                 } else {
-                    // 非菜单模式下，KEY1 仅用于更新活动时间
+                    // 非菜单模式下，KEY1 启动自动控制
                     update_activity_time();
-                    printf("KEY1 pressed (UP)\n");
+                    printf("KEY1 pressed - 启动自动控制\n");
+                    start_auto_control_mode();
                 }
             }
             last_key1_state = current_key1;
@@ -1467,9 +1591,10 @@ void handle_keys(void) {
                 if (menu_visible) {
                     menu_navigate_down();
                 } else {
-                    // 非菜单模式下，KEY0 仅用于更新活动时间
+                    // 非菜单模式下，KEY0 停止自动控制
                     update_activity_time();
-                    printf("KEY0 pressed (DOWN)\n");
+                    printf("KEY0 pressed - 停止自动控制\n");
+                    stop_auto_control_mode();
                 }
             }
             last_key0_state = current_key0;
@@ -1850,10 +1975,10 @@ int main(int argc, char* argv[]) {
             .height = camera_height,
             .pixelformat = CAMERA_PIXELFORMAT,
             .num_planes = 1,
-            .plane_size = {camera_width * camera_height * 2} // RAW10 约2字节/像素
+            .plane_size = {camera_width * camera_height * 5 / 4} // RAW10: 10位/像素 = 1.25字节/像素
         },
         .buffer_count = BUFFER_COUNT,
-        .use_multiplanar = 1,
+        .use_multiplanar = 1,  // 先尝试单平面模式
         .nonblocking = 0
     };
     
@@ -1940,9 +2065,12 @@ int main(int argc, char* argv[]) {
     printf("TCP Server: %s:%d (disabled by default)\n", DEFAULT_SERVER_IP, DEFAULT_PORT);
     
     // 主循环
-    uint32_t loop_count = 0;
     struct timeval last_display_update = {0};
+    struct timeval last_status_update = {0};
+    struct timeval last_info_update = {0};
     gettimeofday(&last_display_update, NULL);
+    gettimeofday(&last_status_update, NULL);
+    gettimeofday(&last_info_update, NULL);
     
     while (!exit_flag) {
         struct timeval current_time;
@@ -1951,8 +2079,13 @@ int main(int argc, char* argv[]) {
         // 处理 LVGL 任务 (高优先级，每次循环都执行)
         lv_timer_handler();
         
-        // 更新子系统状态显示
-        update_subsys_status_display();
+        // 更新子系统状态显示 - 降低频率到每100ms
+        long status_time_diff = (current_time.tv_sec - last_status_update.tv_sec) * 1000000 +
+                               (current_time.tv_usec - last_status_update.tv_usec);
+        if (status_time_diff >= 100000) { // 100ms
+            update_subsys_status_display();
+            last_status_update = current_time;
+        }
         
         // 再次检查退出标志
         if (exit_flag) break;
@@ -1963,8 +2096,10 @@ int main(int argc, char* argv[]) {
         // 再次检查退出标志
         if (exit_flag) break;
         
-        // 检查屏幕自动关闭（摄像头暂停5秒后）
-        check_screen_timeout();
+        // 检查屏幕自动关闭（摄像头暂停5秒后）- 降低频率到每秒
+        if (status_time_diff >= 100000) {
+            check_screen_timeout();
+        }
         
         // 限制图像显示更新频率到30FPS (33ms间隔)
         long display_time_diff = (current_time.tv_sec - last_display_update.tv_sec) * 1000000 +
@@ -1978,19 +2113,17 @@ int main(int argc, char* argv[]) {
             last_display_update = current_time;
         }
         
-        // 更新系统信息 (CPU和内存占用) - 只在屏幕开启时更新
-        if (screen_on) {
+        // 更新系统信息和时间显示 - 降低频率到每秒
+        long info_time_diff = (current_time.tv_sec - last_info_update.tv_sec) * 1000000 +
+                             (current_time.tv_usec - last_info_update.tv_usec);
+        if (info_time_diff >= 1000000 && screen_on) { // 1秒
             update_system_info();
-            update_time_display();  // 更新时间显示
+            update_time_display();
+            last_info_update = current_time;
         }
         
-        // 动态休眠时间：降低CPU占用
-        loop_count++;
-        if (loop_count % 10 == 0) {
-            usleep(10000); // 每10次循环休眠10ms
-        } else {
-            usleep(1000);  // 其他时候休眠1ms
-        }
+        // 增加休眠时间：大幅降低CPU占用
+        usleep(5000);  // 统一休眠5ms，降低循环频率
     }
     
     printf("Main loop exited, shutting down...\n");
