@@ -63,6 +63,7 @@ set(LIB_SUBMODULES
     libmedia
     liblvgl
     libstaging
+    libsubsys
 )
 
 # 检查预编译的库文件是否存在
@@ -106,6 +107,11 @@ set(LVGL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/liblvgl")
 set(LVGL_DIR "${LVGL_ROOT}/lvgl")
 set(LVGL_DRIVERS_DIR "${LVGL_ROOT}/lv_drivers")
 set(LVGL_LIB_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+
+# libsubsys 路径 - 使用统一的构建输出
+set(LIBSUBSYS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libsubsys")
+set(LIBSUBSYS_INCLUDE_DIR "${LIBSUBSYS_DIR}/include")
+set(LIBSUBSYS_LIB_DIR "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 
 # 项目头文件目录
 set(PROJECT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -187,6 +193,7 @@ include_directories(
     ${LIBGPIO_INCLUDE_DIR}
     ${LIBMEDIA_INCLUDE_DIR}
     ${LIBSTAGING_INCLUDE_DIR}
+    ${LIBSUBSYS_INCLUDE_DIR}
     ${LVGL_DIR}
     ${LVGL_DRIVERS_DIR}
     ${LVGL_ROOT}
@@ -244,6 +251,7 @@ target_link_libraries(${PROJECT_NAME}
     ${LIBGPIO_LIB_DIR}/libgpio.so      # libgpio 动态库
     ${LIBMEDIA_LIB_DIR}/libmedia.so    # libMedia 动态库
     ${LIBSTAGING_LIB_DIR}/libstaging.so # libstaging 动态库 (fbtft_benchmark)
+    ${LIBSUBSYS_LIB_DIR}/libsubsys.so  # libsubsys 动态库
     ${LVGL_LIB_DIR}/liblvgl.so         # LVGL 动态库
     m                                   # 数学库
     pthread                            # 线程库

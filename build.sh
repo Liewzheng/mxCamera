@@ -578,7 +578,7 @@ prepare_lvgl() {
 check_submodules() {
     print_status "检查子模块完整性..."
     
-    LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging")
+    LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging" "libsubsys")
     local all_ok=true
     local missing_modules=()
     local incomplete_modules=()
@@ -797,7 +797,7 @@ check_submodule_needs_rebuild() {
 build_submodules() {
     print_status "开始编译子模块（增量模式：$INCREMENTAL）..."
     
-    LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging")
+    LIB_SUBMODULES=("libgpio" "libmedia" "liblvgl" "libstaging" "libsubsys")
     TOOLCHAIN_PREFIX_PATH="$PROJECT_ROOT/toolchains"
     
     local skipped_count=0
@@ -1040,6 +1040,15 @@ create_deployment_package() {
         print_warning "mxcamera 启动脚本不存在，跳过"
     fi
     
+    # 复制图标文件
+    print_status "复制图标文件..."
+    if [ -d "icon" ]; then
+        cp -r icon "$PACKAGE_DIR/"
+        print_success "图标文件复制完成 ($(ls icon/ | wc -l) 个文件)"
+    else
+        print_warning "icon 目录不存在，跳过"
+    fi
+    
     # 创建部署说明文件
     cat > "$PACKAGE_DIR/README.txt" << EOF
 mxCamera 部署包
@@ -1048,6 +1057,7 @@ mxCamera 部署包
 此包包含：
 - bin/mxCamera: 主程序可执行文件
 - lib/*.so.*: 动态库文件
+- icon/: PNG 图标文件目录 (激光、泵、加热器状态图标)
 - deploy.ps1: Windows PowerShell 部署脚本
 - mxCamera_config_example.toml: 配置文件模板
 - mxcamera: Linux 启动服务脚本
@@ -1064,16 +1074,20 @@ mxCamera 部署包
 方法二：手动部署
 1. 将 bin/mxCamera 复制到设备的 /root/Workspace/
 2. 将 lib/*.so.* 复制到设备的 /usr/lib/
-3. 将 mxCamera_config_example.toml 复制到设备的 /root/Workspace/mxCamera_config.toml
-4. 将 mxcamera 复制到设备的 /etc/init.d/S99mxcamera
-5. 在设备上执行: chmod +x /root/Workspace/mxCamera
-6. 在设备上执行: chmod +x /etc/init.d/S99mxcamera
+3. 将 icon/ 目录复制到设备的 /root/Workspace/icon/
+4. 将 mxCamera_config_example.toml 复制到设备的 /root/Workspace/mxCamera_config.toml
+5. 将 mxcamera 复制到设备的 /etc/init.d/S99mxcamera
+6. 在设备上执行: chmod +x /root/Workspace/mxCamera
+7. 在设备上执行: chmod +x /etc/init.d/S99mxcamera
 
 配置说明：
 =========
 - 配置文件位置: /root/Workspace/mxCamera_config.toml
+- 图标文件位置: /root/Workspace/icon/*.png
 - 应用程序启动时会自动读取配置文件
+- 图标用于显示子系统设备状态（激光、泵、加热器）
 - 如果配置文件不存在，会使用默认设置并自动创建配置文件
+- 如果图标文件缺失，会使用文字显示作为后备方案
 - 可以手动编辑配置文件来调整摄像头参数（曝光、增益、分辨率等）
 
 注意事项：

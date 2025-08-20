@@ -38,6 +38,7 @@
 // 库头文件
 #include <gpio.h>
 #include <media.h>
+#include <subsys.h>    // 子系统通信库
 #include "DEV_Config.h"
 #include "lv_drivers/display/fbdev.h"
 #include "lvgl/lvgl.h"
@@ -138,6 +139,14 @@ static int server_fd = -1;
 static int client_fd = -1;
 static pthread_t tcp_thread_id;
 
+// 子系统通信状态
+static subsys_handle_t subsys_handle = NULL;     // 子系统句柄
+static subsys_device_info_t device_info;         // 设备状态信息
+static pthread_t subsys_thread_id;               // 子系统监控线程
+static volatile int subsys_thread_running = 0;   // 子系统线程运行状态
+static struct timeval last_subsys_update;        // 最后更新时间
+static bool subsys_available = false;            // 子系统是否可用
+
 // 媒体会话
 static media_session_t* media_session = NULL;
 
@@ -148,6 +157,15 @@ static lv_obj_t* img_canvas = NULL;
 static lv_obj_t* info_label = NULL;
 // static lv_obj_t* tcp_label = NULL;
 static lv_obj_t* time_label = NULL;  // 时间显示标签
+static lv_obj_t* subsys_panel = NULL;    // 子系统状态面板
+static lv_obj_t* laser_icon = NULL;      // 激光图标
+static lv_obj_t* pump_icon = NULL;       // 气泵图标
+static lv_obj_t* heater1_icon = NULL;    // 加热器1图标
+static lv_obj_t* heater2_icon = NULL;    // 加热器2图标
+static lv_obj_t* laser_label = NULL;     // 激光状态标签
+static lv_obj_t* pump_label = NULL;      // 气泵状态标签
+static lv_obj_t* heater1_label = NULL;   // 加热器1状态标签
+static lv_obj_t* heater2_label = NULL;   // 加热器2状态标签
 static lv_obj_t* menu_panel = NULL;  // 设置菜单面板
 static lv_obj_t* menu_tcp_btn = NULL;  // TCP 按钮
 static lv_obj_t* menu_display_btn = NULL;  // DISPLAY 按钮
@@ -229,6 +247,271 @@ void signal_handler(int sig) {
     
     // 给线程一些时间来响应退出标志
     usleep(100000); // 100ms
+}
+
+// ============================================================================
+// 子系统通信函数
+// ============================================================================
+
+/**
+ * @brief 初始化子系统通信
+ * @return 0=成功，-1=失败
+ */
+int init_subsystem(void) {
+    printf("初始化子系统通信...\n");
+    
+    // 初始化状态标记
+    subsys_available = false;
+    
+    // 初始化子系统句柄
+    subsys_handle = subsys_init(NULL, 0);  // 使用默认设备和波特率
+    if (!subsys_handle) {
+        printf("警告: 子系统初始化失败，将以离线模式运行\n");
+        
+        // 初始化设备状态为离线状态
+        memset(&device_info, 0, sizeof(device_info));
+        device_info.pump_status = SUBSYS_STATUS_UNKNOWN;
+        device_info.laser_status = SUBSYS_STATUS_UNKNOWN;
+        device_info.heater1_status = SUBSYS_STATUS_UNKNOWN;
+        device_info.heater2_status = SUBSYS_STATUS_UNKNOWN;
+        device_info.temp1_valid = false;
+        device_info.temp2_valid = false;
+        
+        return 0;  // 不返回错误，继续启动
+    }
+    
+    // 检查子系统版本
+    subsys_version_t version;
+    if (subsys_get_version(subsys_handle, &version) == 0) {
+        printf("子系统版本: %s\n", version.version_string);
+        
+        // 检查版本是否满足要求（>= 0.2.0）
+        if (!subsys_version_check(&version, 0, 2, 0)) {
+            printf("警告: 子系统版本过低，要求 >= 0.2.0，当前 %d.%d.%d\n", 
+                   version.major, version.minor, version.patch);
+            // 继续运行，但可能功能受限
+        } else {
+            printf("子系统版本检查通过\n");
+        }
+    } else {
+        printf("警告: 无法获取子系统版本信息\n");
+    }
+    
+    // 获取MCU序列号
+    char serial[64];
+    if (subsys_get_mcu_serial(subsys_handle, serial, sizeof(serial)) == 0) {
+        printf("MCU序列号: %s\n", serial);
+    }
+    
+    // 初始化设备状态
+    memset(&device_info, 0, sizeof(device_info));
+    device_info.pump_status = SUBSYS_STATUS_OFF;
+    device_info.laser_status = SUBSYS_STATUS_OFF;
+    device_info.heater1_status = SUBSYS_STATUS_OFF;
+    device_info.heater2_status = SUBSYS_STATUS_OFF;
+    
+    // 初始化时间戳
+    gettimeofday(&last_subsys_update, NULL);
+    
+    // 标记子系统可用
+    subsys_available = true;
+    
+    printf("子系统通信初始化完成\n");
+    return 0;
+}
+
+/**
+ * @brief 启动温度控制
+ */
+void start_temperature_control(void) {
+    if (!subsys_available || !subsys_handle) {
+        printf("跳过温度控制启动：子系统不可用\n");
+        return;
+    }
+    
+    printf("启动温度控制，目标温度: 60°C\n");
+    
+    // 启动加热器1的温度控制，目标60度
+    if (subsys_start_temp_control(subsys_handle, 1, 60.0f) == 0) {
+        printf("加热器1温度控制已启动\n");
+    } else {
+        printf("警告: 加热器1温度控制启动失败\n");
+    }
+    
+    // 启动加热器2的温度控制，目标60度
+    if (subsys_start_temp_control(subsys_handle, 2, 60.0f) == 0) {
+        printf("加热器2温度控制已启动\n");
+    } else {
+        printf("警告: 加热器2温度控制启动失败\n");
+    }
+}
+
+/**
+ * @brief 子系统监控线程
+ */
+void* subsys_monitor_thread(void* arg) {
+    (void)arg;  // 未使用的参数
+    
+    printf("子系统监控线程已启动\n");
+    
+    while (subsys_thread_running && !exit_flag) {
+        if (!subsys_available || !subsys_handle) {
+            // 子系统不可用，等待一段时间后继续循环
+            usleep(1000000);  // 1秒
+            continue;
+        }
+        
+        // 更新设备信息
+        if (subsys_get_device_info(subsys_handle, &device_info) == 0) {
+            gettimeofday(&last_subsys_update, NULL);
+        }
+        
+        // 执行温度控制处理
+        subsys_temp_control_process(subsys_handle);
+        
+        // 等待500ms
+        usleep(500000);
+    }
+    
+    printf("子系统监控线程已退出\n");
+    return NULL;
+}
+
+/**
+ * @brief 启动子系统监控线程
+ * @return 0=成功，-1=失败
+ */
+int start_subsys_monitor(void) {
+    if (subsys_thread_running) {
+        return 0;  // 已经在运行
+    }
+    
+    subsys_thread_running = 1;
+    
+    if (pthread_create(&subsys_thread_id, NULL, subsys_monitor_thread, NULL) != 0) {
+        printf("错误: 创建子系统监控线程失败\n");
+        subsys_thread_running = 0;
+        return -1;
+    }
+    
+    return 0;
+}
+
+/**
+ * @brief 停止子系统监控线程
+ */
+void stop_subsys_monitor(void) {
+    if (!subsys_thread_running) {
+        return;
+    }
+    
+    subsys_thread_running = 0;
+    
+    // 等待线程结束
+    pthread_join(subsys_thread_id, NULL);
+}
+
+/**
+ * @brief 清理子系统资源
+ */
+void cleanup_subsystem(void) {
+    printf("清理子系统资源...\n");
+    
+    // 停止监控线程
+    stop_subsys_monitor();
+    
+    // 如果子系统可用，执行清理操作
+    if (subsys_available && subsys_handle) {
+        // 停止温度控制
+        subsys_stop_temp_control(subsys_handle, 1);
+        subsys_stop_temp_control(subsys_handle, 2);
+        
+        // 关闭所有设备
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+        
+        // 释放子系统句柄
+        subsys_cleanup(subsys_handle);
+    }
+    
+    subsys_handle = NULL;
+    subsys_available = false;
+    
+    printf("子系统资源清理完成\n");
+}
+
+/**
+ * @brief 更新子系统状态显示
+ */
+void update_subsys_status_display(void) {
+    if (!laser_icon || !pump_icon || !heater1_icon || !heater2_icon ||
+        !laser_label || !pump_label || !heater1_label || !heater2_label) {
+        return;
+    }
+    
+    // 如果子系统不可用，所有显示为灰色
+    if (!subsys_available) {
+        lv_color_t gray_color = lv_color_make(128, 128, 128);
+        
+        // 图标变灰色
+        lv_obj_set_style_img_recolor(laser_icon, gray_color, 0);
+        lv_obj_set_style_img_recolor(pump_icon, gray_color, 0);
+        lv_obj_set_style_img_recolor(heater1_icon, gray_color, 0);
+        lv_obj_set_style_img_recolor(heater2_icon, gray_color, 0);
+        
+        // 标签变灰色
+        lv_obj_set_style_text_color(laser_label, gray_color, 0);
+        lv_obj_set_style_text_color(pump_label, gray_color, 0);
+        lv_obj_set_style_text_color(heater1_label, gray_color, 0);
+        lv_obj_set_style_text_color(heater2_label, gray_color, 0);
+        
+        // 更新文本内容
+        lv_label_set_text(heater1_label, "热片1:离线");
+        lv_label_set_text(heater2_label, "热片2:离线");
+        
+        return;
+    }
+    
+    // 子系统可用时的正常显示
+    // 更新激光状态显示
+    lv_color_t laser_color = (device_info.laser_status == SUBSYS_STATUS_ON) ? 
+                            lv_color_make(255, 100, 100) : lv_color_white();
+    lv_obj_set_style_img_recolor(laser_icon, laser_color, 0);
+    lv_obj_set_style_text_color(laser_label, laser_color, 0);
+    
+    // 更新气泵状态显示
+    lv_color_t pump_color = (device_info.pump_status == SUBSYS_STATUS_ON) ? 
+                           lv_color_make(255, 100, 100) : lv_color_white();
+    lv_obj_set_style_img_recolor(pump_icon, pump_color, 0);
+    lv_obj_set_style_text_color(pump_label, pump_color, 0);
+    
+    // 更新加热器1状态显示
+    char heater1_text[32];
+    if (device_info.temp1_valid) {
+        snprintf(heater1_text, sizeof(heater1_text), "热片1:%.1f°C", (double)device_info.temp1);
+    } else {
+        snprintf(heater1_text, sizeof(heater1_text), "热片1:--°C");
+    }
+    lv_label_set_text(heater1_label, heater1_text);
+    lv_color_t heater1_color = (device_info.heater1_status == SUBSYS_STATUS_ON) ? 
+                              lv_color_make(255, 100, 100) : lv_color_white();
+    lv_obj_set_style_img_recolor(heater1_icon, heater1_color, 0);
+    lv_obj_set_style_text_color(heater1_label, heater1_color, 0);
+    
+    // 更新加热器2状态显示
+    char heater2_text[32];
+    if (device_info.temp2_valid) {
+        snprintf(heater2_text, sizeof(heater2_text), "热片2:%.1f°C", (double)device_info.temp2);
+    } else {
+        snprintf(heater2_text, sizeof(heater2_text), "热片2:--°C");
+    }
+    lv_label_set_text(heater2_label, heater2_text);
+    lv_color_t heater2_color = (device_info.heater2_status == SUBSYS_STATUS_ON) ? 
+                              lv_color_make(255, 100, 100) : lv_color_white();
+    lv_obj_set_style_img_recolor(heater2_icon, heater2_color, 0);
+    lv_obj_set_style_text_color(heater2_label, heater2_color, 0);
 }
 
 /**
@@ -1369,6 +1652,76 @@ void init_lvgl_ui(void) {
     lv_obj_set_style_pad_all(menu_usb_config_btn, 4, 0);
     lv_obj_align(menu_usb_config_btn, LV_ALIGN_TOP_MID, 0, 135);
     
+    // 创建子系统状态面板 (屏幕底部)
+    subsys_panel = lv_obj_create(scr);
+    lv_obj_set_size(subsys_panel, DISPLAY_WIDTH, 30);
+    lv_obj_align(subsys_panel, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(subsys_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(subsys_panel, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(subsys_panel, 0, 0);
+    lv_obj_set_style_pad_all(subsys_panel, 2, 0);
+    
+    // 创建子系统状态面板
+    subsys_panel = lv_obj_create(scr);
+    lv_obj_set_size(subsys_panel, DISPLAY_WIDTH, 50);  // 增加高度以容纳图标
+    lv_obj_align(subsys_panel, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(subsys_panel, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(subsys_panel, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(subsys_panel, 0, 0);
+    lv_obj_set_style_pad_all(subsys_panel, 5, 0);
+    
+    // 激光图标和标签
+    laser_icon = lv_img_create(subsys_panel);
+    lv_img_set_src(laser_icon, "A:icon/laser.png");
+    lv_obj_align(laser_icon, LV_ALIGN_LEFT_MID, 10, -10);
+    lv_obj_set_style_img_recolor_opa(laser_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_img_recolor(laser_icon, lv_color_white(), 0);
+    
+    laser_label = lv_label_create(subsys_panel);
+    lv_label_set_text(laser_label, "激光");
+    lv_obj_set_style_text_color(laser_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(laser_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(laser_label, laser_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    
+    // 气泵图标和标签
+    pump_icon = lv_img_create(subsys_panel);
+    lv_img_set_src(pump_icon, "A:icon/pump.png");
+    lv_obj_align(pump_icon, LV_ALIGN_LEFT_MID, 80, -10);
+    lv_obj_set_style_img_recolor_opa(pump_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_img_recolor(pump_icon, lv_color_white(), 0);
+    
+    pump_label = lv_label_create(subsys_panel);
+    lv_label_set_text(pump_label, "泵");
+    lv_obj_set_style_text_color(pump_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(pump_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(pump_label, pump_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    
+    // 加热器1图标和标签
+    heater1_icon = lv_img_create(subsys_panel);
+    lv_img_set_src(heater1_icon, "A:icon/heater.png");
+    lv_obj_align(heater1_icon, LV_ALIGN_LEFT_MID, 150, -10);
+    lv_obj_set_style_img_recolor_opa(heater1_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_img_recolor(heater1_icon, lv_color_white(), 0);
+    
+    heater1_label = lv_label_create(subsys_panel);
+    lv_label_set_text(heater1_label, "热片1:--°C");
+    lv_obj_set_style_text_color(heater1_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(heater1_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(heater1_label, heater1_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    
+    // 加热器2图标和标签
+    heater2_icon = lv_img_create(subsys_panel);
+    lv_img_set_src(heater2_icon, "A:icon/heater.png");
+    lv_obj_align(heater2_icon, LV_ALIGN_LEFT_MID, 240, -10);
+    lv_obj_set_style_img_recolor_opa(heater2_icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_img_recolor(heater2_icon, lv_color_white(), 0);
+    
+    heater2_label = lv_label_create(subsys_panel);
+    lv_label_set_text(heater2_label, "热片2:--°C");
+    lv_obj_set_style_text_color(heater2_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(heater2_label, &lv_font_montserrat_12, 0);
+    lv_obj_align_to(heater2_label, heater2_icon, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+    
     // 初始化时间更新时间戳
     gettimeofday(&last_time_update, NULL);
     
@@ -1413,6 +1766,9 @@ int main(int argc, char* argv[]) {
     
     // 初始化 LVGL
     lv_init();
+    
+    // 初始化LVGL文件系统 (用于加载图标)
+    lv_fs_stdio_init();
     
     // 检查显示配置
     check_display_config();
@@ -1462,6 +1818,23 @@ int main(int argc, char* argv[]) {
         printf("Warning: INA219 initialization failed, battery monitoring disabled\n");
     }
 #endif
+
+    // 初始化子系统通信
+    init_subsystem();  // 总是成功，但可能以离线模式运行
+    
+    if (subsys_available) {
+        printf("子系统通信初始化成功\n");
+        
+        // 启动子系统监控线程
+        if (start_subsys_monitor() == 0) {
+            printf("子系统监控线程已启动\n");
+        }
+        
+        // 启动温度控制（目标60度）
+        start_temperature_control();
+    } else {
+        printf("警告: 子系统通信不可用，将以离线模式运行\n");
+    }
 
     // 初始化 libMedia
     if (libmedia_init() != 0) {
@@ -1578,6 +1951,9 @@ int main(int argc, char* argv[]) {
         // 处理 LVGL 任务 (高优先级，每次循环都执行)
         lv_timer_handler();
         
+        // 更新子系统状态显示
+        update_subsys_status_display();
+        
         // 再次检查退出标志
         if (exit_flag) break;
         
@@ -1657,6 +2033,10 @@ int main(int argc, char* argv[]) {
     }
     
 cleanup:
+    // 清理子系统资源
+    printf("Cleaning up subsystem...\n");
+    cleanup_subsystem();
+    
     // 等待TCP线程结束
     if (tcp_enabled) {
         printf("Waiting for TCP thread to exit...\n");

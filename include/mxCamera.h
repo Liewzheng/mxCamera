@@ -266,4 +266,16 @@ float get_battery_current(void);
 float get_battery_power(void);
 int is_ina219_initialized(void);
 
+// ============================================================================
+// 子系统模块函数声明 (main.c)
+// ============================================================================
+
+int init_subsystem(void);
+void start_temperature_control(void);
+void* subsys_monitor_thread(void* arg);
+int start_subsys_monitor(void);
+void stop_subsys_monitor(void);
+void cleanup_subsystem(void);
+void update_subsys_status_display(void);
+
 #endif /* _MXCAMERA_H_ */

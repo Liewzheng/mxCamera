@@ -44,6 +44,27 @@ if (Test-Path "bin/mxCamera") {
     exit 1
 }
 
+# 部署图标文件
+Write-Host "部署图标文件..." -ForegroundColor Yellow
+if (Test-Path "icon") {
+    # 创建图标目录
+    adb shell "mkdir -p /root/Workspace/icon"
+    
+    # 部署所有图标文件
+    $iconFiles = Get-ChildItem "icon" -Filter "*.png"
+    if ($iconFiles.Count -gt 0) {
+        foreach ($iconFile in $iconFiles) {
+            adb push $iconFile.FullName "/root/Workspace/icon/$($iconFile.Name)"
+            Write-Host "部署图标文件: $($iconFile.Name)" -ForegroundColor Green
+        }
+        Write-Host "图标文件部署完成 ($($iconFiles.Count) 个文件)" -ForegroundColor Green
+    } else {
+        Write-Warning "icon 目录中没有找到 PNG 文件"
+    }
+} else {
+    Write-Warning "icon 目录不存在，跳过图标文件部署"
+}
+
 # 部署动态库文件
 Write-Host "部署动态库文件..." -ForegroundColor Yellow
 if (Test-Path "lib") {
@@ -146,10 +167,11 @@ Write-Host "" -ForegroundColor White
 Write-Host "=== 部署完成 ===" -ForegroundColor Green
 Write-Host "可执行文件位置: /root/Workspace/mxCamera" -ForegroundColor White
 Write-Host "配置文件位置: /root/Workspace/mxCamera_config.toml" -ForegroundColor White
+Write-Host "图标文件位置: /root/Workspace/icon/*.png" -ForegroundColor White
 Write-Host "启动脚本位置: /etc/init.d/S99mxcamera" -ForegroundColor White
 Write-Host "" -ForegroundColor White
 Write-Host "手动启动方式:" -ForegroundColor Yellow
-Write-Host "  adb shell '/root/Workspace/mxCamera'" -ForegroundColor White
+Write-Host "  adb shell 'cd /root/Workspace && ./mxCamera'" -ForegroundColor White
 Write-Host "" -ForegroundColor White
 Write-Host "服务启动方式:" -ForegroundColor Yellow  
 Write-Host "  adb shell '/etc/init.d/S99mxcamera start'" -ForegroundColor White
@@ -159,4 +181,6 @@ Write-Host "  adb reboot" -ForegroundColor White
 Write-Host "" -ForegroundColor White
 Write-Host "配置管理:" -ForegroundColor Yellow
 Write-Host "  应用程序会自动读取并保存配置到 /root/Workspace/mxCamera_config.toml" -ForegroundColor White
+Write-Host "  图标文件位于 /root/Workspace/icon/ 目录，用于显示设备状态" -ForegroundColor White
+Write-Host "  如果图标文件缺失，程序会自动使用文字显示作为后备方案" -ForegroundColor White
 Write-Host "  可以直接编辑配置文件来调整摄像头参数" -ForegroundColor White
