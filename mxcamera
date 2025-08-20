@@ -18,7 +18,22 @@ case "$1" in
 start)
     echo "Starting $DAEMON..."
     cd $DAEMON_PATH
-    nohup ./$DAEMON $DAEMON_ARGS > /var/log/mxcamera.log 2>&1 & echo $! > $PIDFILE
+
+    # 查找并终止rkipc进程
+    echo "Checking for rkipc processes..."
+    RKIPC_PIDS=$(ps au | grep rkipc | grep -v grep | awk '{print $1}')
+    if [ ! -z "$RKIPC_PIDS" ]; then
+        echo "Found rkipc processes: $RKIPC_PIDS"
+        for pid in $RKIPC_PIDS; do
+            kill $pid
+        done
+        echo "rkipc processes terminated"
+        sleep 1
+    else
+        echo "No rkipc processes found"
+    fi
+    
+    nohup ./$DAEMON $DAEMON_ARGS > /var/log/mxCamera.log 2>&1 & echo $! > $PIDFILE
     ;;
 stop)
     echo "Stopping $DAEMON..."
