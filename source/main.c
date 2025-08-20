@@ -98,6 +98,9 @@ static int current_img_height = DISPLAY_HEIGHT;
 #define CONFIG_TIME_BASE_MONTH 8
 #define CONFIG_TIME_BASE_DAY 5
 
+// 电量显示控制开关，如果不需要显示则设置为 0
+#define BATTERY_SHOW 0
+
 
 // ============================================================================
 // 全局变量
@@ -1450,14 +1453,16 @@ int main(int argc, char* argv[]) {
         printf("Failed to initialize GPIO\n");
         return -1;
     }
-    
+
+#if (BATTERY_SHOW)
     // 初始化 INA219 电池监测 (可选，失败不影响主要功能)
     if (init_ina219() == 0) {
         printf("INA219 battery monitoring initialized\n");
     } else {
         printf("Warning: INA219 initialization failed, battery monitoring disabled\n");
     }
-    
+#endif
+
     // 初始化 libMedia
     if (libmedia_init() != 0) {
         printf("Failed to initialize libMedia\n");
@@ -1705,8 +1710,10 @@ cleanup:
         lcd_initialized = 0;
     }
 
+#if (BATTERY_SHOW)
     // 清理 INA219 电池监测
     cleanup_ina219();
+#endif
 
     // 清理USB配置模块
     printf("Cleaning up USB configuration...\n");
@@ -1738,16 +1745,18 @@ void update_time_display(void) {
     // 检查时间显示是否需要更新（每分钟）
     long time_diff = (current_time.tv_sec - last_time_update.tv_sec) * 1000000 +
                      (current_time.tv_usec - last_time_update.tv_usec);
-    
-    static struct timeval last_battery_update = {0, 0};
-    long battery_time_diff = (current_time.tv_sec - last_battery_update.tv_sec) * 1000000 +
-                            (current_time.tv_usec - last_battery_update.tv_usec);
-    
+
     // 获取当前时间字符串
     time_t now = time(NULL);
     struct tm* tm_info = localtime(&now);
     char time_str[32];
     strftime(time_str, 16, "%H:%M", tm_info);
+    char display_str[64];
+
+#if (BATTERY_SHOW)
+    static struct timeval last_battery_update = {0, 0};
+    long battery_time_diff = (current_time.tv_sec - last_battery_update.tv_sec) * 1000000 +
+                            (current_time.tv_usec - last_battery_update.tv_usec);
     
     // 初始化或更新电池状态（每5秒更新一次）
     static float last_battery_percentage = -1.0f;
@@ -1783,7 +1792,6 @@ void update_time_display(void) {
     }
     
     // 更新显示内容（增加缓冲区大小以避免截断警告）
-    char display_str[64];
     if (last_battery_percentage >= 0) {
         // 根据电池电量决定显示颜色
         if (last_battery_percentage < 20.0f && !is_charging) {
@@ -1818,6 +1826,18 @@ void update_time_display(void) {
             printf("Display updated due to battery status change\n");
         }
     }
+#else
+    snprintf(display_str, sizeof(display_str), "%s  #ffffff #", time_str);
+
+    if (time_diff >= 60000000 )
+    {
+        // 启用富文本模式以支持颜色
+        lv_label_set_recolor(time_label, true);
+        lv_label_set_text(time_label, display_str);
+        last_time_update = current_time;
+    }
+#endif
+
 }
 
 /**
@@ -1855,8 +1875,6 @@ void update_menu_selection(void) {
     if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn || !menu_usb_config_btn) return;
     
     // 重置所有选项的背景
-   
-      
     lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_30, 0);
     lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
