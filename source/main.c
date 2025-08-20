@@ -1978,7 +1978,7 @@ int main(int argc, char* argv[]) {
             .plane_size = {camera_width * camera_height * 5 / 4} // RAW10: 10位/像素 = 1.25字节/像素
         },
         .buffer_count = BUFFER_COUNT,
-        .use_multiplanar = 1,  // 先尝试单平面模式
+        .use_multiplanar = 1,  // 多平面
         .nonblocking = 0
     };
     
