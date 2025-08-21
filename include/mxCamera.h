@@ -271,10 +271,6 @@ int is_ina219_initialized(void);
 // ============================================================================
 
 int init_subsystem(void);
-void start_temperature_control(void);
-void* subsys_monitor_thread(void* arg);
-int start_subsys_monitor(void);
-void stop_subsys_monitor(void);
 void cleanup_subsystem(void);
 void update_subsys_status_display(void);
 
