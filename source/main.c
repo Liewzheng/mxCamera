@@ -482,7 +482,9 @@ void *auto_control_thread(void *arg)
         }
 
         if (!auto_control_thread_running || exit_flag)
+        {
             break;
+        }
 
         // 开启激光
         int result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, true);
@@ -506,7 +508,7 @@ void *auto_control_thread(void *arg)
                 gettimeofday(&last_subsys_update, NULL);
             }
         }
-        
+
         // 关闭激光
         result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
         if (result == 0)
@@ -525,9 +527,16 @@ void *auto_control_thread(void *arg)
     {
         printf("自动控制：正在关闭所有设备...\n");
         subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
-        usleep(500000); // 等待500ms
         subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+        subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
         printf("自动控制：所有设备已关闭\n");
+
+        // 获取设备状态信息
+        if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+        {
+            gettimeofday(&last_subsys_update, NULL);
+        }
     }
 
     printf("自动控制线程已退出\n");
