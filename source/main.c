@@ -209,7 +209,19 @@ static int config_loaded = 0;            // 配置是否已加载
  */
 void signal_handler(int sig)
 {
-    printf("\nReceived signal %d, cleaning up...\n", sig);
+    static int signal_count = 0;
+    signal_count++;
+    
+    printf("\nReceived signal %d (count: %d), cleaning up...\n", sig, signal_count);
+    
+    // 第二次信号强制退出
+    if (signal_count >= 2)
+    {
+        printf("Force exit requested, terminating immediately...\n");
+        fflush(stdout);
+        _exit(1);
+    }
+    
     exit_flag = 1;
     tcp_enabled = 0; // 停止TCP传输
 
@@ -1686,13 +1698,24 @@ void update_image_display(void)
 void *camera_thread(void *arg)
 {
     printf("Camera thread started (always running)\n");
+    
+    // 设置线程取消状态
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
     while (!exit_flag)
     {
+        // 添加取消点
+        pthread_testcancel();
+        
         media_frame_t frame;
 
         // 采集帧数据 (减少超时时间，更快响应退出)
         int ret = libmedia_session_capture_frame(media_session, &frame, 50); // 50ms 超时
+        
+        // 在每次操作后检查取消
+        pthread_testcancel();
+        
         if (ret == 0)
         {
             // 再次检查退出标志
@@ -1721,14 +1744,29 @@ void *camera_thread(void *arg)
             // 更新帧率
             update_fps();
         }
-        else if (ret != -EAGAIN)
+        else if (ret == -EAGAIN)
+        {
+            // 超时，继续循环检查退出标志
+            continue;
+        }
+        else
         {
             if (!exit_flag)
             { // 只在未退出时打印错误
                 printf("Failed to capture frame: %d\n", ret);
             }
+            // 在错误情况下添加小延迟，避免忙循环
             usleep(10000); // 10ms
         }
+        
+        // 在循环末尾再次检查退出标志，确保快速响应
+        if (exit_flag)
+        {
+            break;
+        }
+        
+        // 添加取消点
+        pthread_testcancel();
     }
 
     printf("Camera thread exited\n");
@@ -2383,6 +2421,35 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
+    // 如果命令行启用了TCP，启动TCP服务器线程
+    if (tcp_enabled)
+    {
+        printf("Starting TCP server thread as enabled via command line...\n");
+        
+        // 先创建TCP服务器
+        server_fd = create_server(DEFAULT_PORT);
+        if (server_fd >= 0)
+        {
+            // 创建TCP发送线程
+            if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0)
+            {
+                printf("TCP server started successfully\n");
+            }
+            else
+            {
+                printf("Failed to create TCP thread\n");
+                close(server_fd);
+                server_fd = -1;
+                tcp_enabled = 0;
+            }
+        }
+        else
+        {
+            printf("Failed to create TCP server socket\n");
+            tcp_enabled = 0;
+        }
+    }
+
     printf("System initialized successfully\n");
     printf("Display: %dx%d (forced landscape mode)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     printf("Camera: %dx%d (RAW10) on %s\n", camera_width, camera_height, DEFAULT_CAMERA_DEVICE);
@@ -2408,7 +2475,8 @@ int main(int argc, char *argv[])
     printf("  - TCP: Controlled by KEY1 (independent of display status) or Settings Menu\n");
     printf("  - Settings Menu: Controlled by KEY2 (virtual menu with TCP & DISPLAY options)\n");
     printf("  - Time Display: Real-time clock in top-right corner (updates every minute)\n");
-    printf("TCP Server: %s:%d (disabled by default)\n", DEFAULT_SERVER_IP, DEFAULT_PORT);
+    printf("TCP Server: %s:%d (%s)\n", DEFAULT_SERVER_IP, DEFAULT_PORT, 
+           tcp_enabled ? "enabled" : "disabled by default");
 
     // 主循环
     struct timeval last_display_update = {0};
@@ -2505,18 +2573,32 @@ int main(int argc, char *argv[])
         libmedia_stop_session(media_session);
     }
 
-    // 等待摄像头线程结束 (设置超时)
+    // 等待摄像头线程结束 (设置更短的超时)
     printf("Waiting for camera thread to exit...\n");
     struct timespec timeout;
     clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 3; // 3秒超时
+    timeout.tv_sec += 1; // 缩短超时时间到1秒
 
     int join_result = pthread_timedjoin_np(camera_tid, NULL, &timeout);
     if (join_result == ETIMEDOUT)
     {
         printf("Warning: Camera thread did not exit within timeout, canceling...\n");
         pthread_cancel(camera_tid);
-        pthread_join(camera_tid, NULL);
+        
+        // 给一个很短的时间让取消操作完成
+        timeout.tv_sec = time(NULL) + 1;
+        timeout.tv_nsec = 0;
+        
+        int cancel_join_result = pthread_timedjoin_np(camera_tid, NULL, &timeout);
+        if (cancel_join_result == ETIMEDOUT)
+        {
+            printf("Warning: Camera thread cancel timeout, forcing exit\n");
+            // 不再等待，强制继续清理
+        }
+        else if (cancel_join_result == 0)
+        {
+            printf("Camera thread canceled successfully\n");
+        }
     }
     else if (join_result != 0)
     {
