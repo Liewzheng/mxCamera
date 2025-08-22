@@ -64,7 +64,7 @@
 #define DEFAULT_CAMERA_HEIGHT 1080
 #define CAMERA_PIXELFORMAT V4L2_PIX_FMT_SBGGR10
 #define DEFAULT_CAMERA_DEVICE "/dev/video0"
-#define BUFFER_COUNT 2 // 使用单缓冲以避免 CMA 分配失败
+#define BUFFER_COUNT 4 // 增加缓冲区数量以减少帧丢失，提高帧率稳定性
 
 // 全局摄像头配置变量 (可通过命令行修改)
 static int camera_width = DEFAULT_CAMERA_WIDTH;
@@ -88,7 +88,7 @@ static int current_img_height = DISPLAY_HEIGHT;
 
 // 帧率统计配置 (重新定义以避免冲突)
 #undef FPS_UPDATE_INTERVAL
-#define FPS_UPDATE_INTERVAL 1000000 // 1秒 (微秒)
+#define FPS_UPDATE_INTERVAL 1000000 // 1秒 (微秒)，稳定的帧率统计间隔
 
 // 配置文件相关常量
 #define CONFIG_FILE_PATH "/root/Workspace/mxCamera_config.toml"
@@ -1401,10 +1401,10 @@ void update_system_info(void)
         float mem_usage = get_memory_usage();
 
         char info_text[64];
-        // 格式：帧率 CPU占用率% 内存占用率%
-        // 例如：30.4FPS 98% 70%
+        // 格式：采集帧率 CPU占用率% 内存占用率%
+        // 例如：30.4cFPS 98% 70% (c表示capture采集帧率)
         snprintf(info_text, sizeof(info_text),
-                 "%.1fFPS  %.0f%%  %.0f%%",
+                 "%.1fcFPS  %.0f%%  %.0f%%",
                  (double)current_fps,
                  (double)(cpu_usage >= 0 ? cpu_usage : 0),
                  (double)(mem_usage >= 0 ? mem_usage : 0));
@@ -1661,7 +1661,7 @@ void update_image_display(void)
                    camera_width, camera_height, required_size);
         }
 
-        // 只在尺寸变化时打印处理信息
+        // 只在尺寸变化时打印处理信息，减少日志开销
         if (current_frame.width != last_processed_width || current_frame.height != last_processed_height)
         {
             printf("Processing frame: %dx%d -> %dx%d\n",
@@ -1752,8 +1752,8 @@ void *camera_thread(void *arg)
         
         media_frame_t frame;
 
-        // 采集帧数据 (减少超时时间，更快响应退出)
-        int ret = libmedia_session_capture_frame(media_session, &frame, 50); // 50ms 超时
+        // 采集帧数据 (进一步优化超时时间以达到30FPS)
+        int ret = libmedia_session_capture_frame(media_session, &frame, 25); // 25ms 超时，更积极的帧率目标
         
         // 在每次操作后检查取消
         pthread_testcancel();
@@ -1783,7 +1783,7 @@ void *camera_thread(void *arg)
             pthread_cond_broadcast(&frame_ready);
             pthread_mutex_unlock(&frame_mutex);
 
-            // 更新帧率
+            // 更新采集帧率统计
             update_fps();
         }
         else if (ret == -EAGAIN)
@@ -1797,8 +1797,8 @@ void *camera_thread(void *arg)
             { // 只在未退出时打印错误
                 printf("Failed to capture frame: %d\n", ret);
             }
-            // 在错误情况下添加小延迟，避免忙循环
-            usleep(10000); // 10ms
+            // 在错误情况下添加最小延迟，最大化帧率
+            usleep(1000); // 1ms，最小错误恢复时间
         }
         
         // 在循环末尾再次检查退出标志，确保快速响应
@@ -2056,15 +2056,21 @@ void handle_keys(void)
     // KEYX 长按检测 (在按键持续按下时检查)
     if (current_keyx == 0 && last_keyx_state == 0 && !keyx_long_press_triggered)
     {
-        // KEYX 持续按下，检查是否超过3秒
+        // KEYX 持续按下，检查是否超过5秒 (增加时间，避免误触)
         long press_duration = (current_time.tv_sec - keyx_press_start.tv_sec) * 1000000 +
                               (current_time.tv_usec - keyx_press_start.tv_usec);
 
-        if (press_duration >= 3000000)
-        { // 3秒 = 3,000,000 微秒
+        // 在RNDIS模式下禁用关机功能，避免网络干扰导致的误触
+        if (press_duration >= 5000000 && get_usb_mode() != USB_MODE_RNDIS)
+        { // 5秒 = 5,000,000 微秒，且非RNDIS模式
             keyx_long_press_triggered = true;
             printf("KEYX长按检测：执行关机...\n");
             system("poweroff"); // 执行关机命令
+        }
+        else if (press_duration >= 5000000 && get_usb_mode() == USB_MODE_RNDIS)
+        {
+            keyx_long_press_triggered = true;
+            printf("KEYX长按检测：RNDIS模式下禁用关机功能\n");
         }
     }
 }
@@ -2601,15 +2607,6 @@ int main(int argc, char *argv[])
         // 处理 LVGL 任务 (高优先级，每次循环都执行)
         lv_timer_handler();
 
-        // 更新子系统状态显示 - 降低频率到每100ms
-        long status_time_diff = (current_time.tv_sec - last_status_update.tv_sec) * 1000000 +
-                                (current_time.tv_usec - last_status_update.tv_usec);
-        if (status_time_diff >= 100000)
-        { // 100ms
-            update_subsys_status_display();
-            last_status_update = current_time;
-        }
-
         // 再次检查退出标志
         if (exit_flag)
             break;
@@ -2621,24 +2618,31 @@ int main(int argc, char *argv[])
         if (exit_flag)
             break;
 
-        // 检查屏幕自动关闭（摄像头暂停5秒后）- 降低频率到每秒
-        if (status_time_diff >= 100000)
-        {
-            check_screen_timeout();
-        }
-
-        // 限制图像显示更新频率到30FPS (33ms间隔)
+        // 限制图像显示更新频率到30FPS - 进一步优化
         long display_time_diff = (current_time.tv_sec - last_display_update.tv_sec) * 1000000 +
                                  (current_time.tv_usec - last_display_update.tv_usec);
 
-        if (display_time_diff >= 33333)
-        { // 30 FPS = 33.33ms
+        if (display_time_diff >= 25000)
+        { // 优化为25ms以提高到40FPS潜力，实际受限于摄像头
             // 只在屏幕开启且显示启用时更新图像显示
             if (screen_on && display_enabled)
             {
                 update_image_display();
             }
             last_display_update = current_time;
+        }
+
+        // 更新子系统状态显示 - 降低频率到每200ms
+        long status_time_diff = (current_time.tv_sec - last_status_update.tv_sec) * 1000000 +
+                                (current_time.tv_usec - last_status_update.tv_usec);
+        if (status_time_diff >= 200000)
+        { // 200ms，减少干扰
+            update_subsys_status_display();
+            
+            // 检查屏幕自动关闭（摄像头暂停5秒后）
+            check_screen_timeout();
+            
+            last_status_update = current_time;
         }
 
         // 更新系统信息和时间显示 - 降低频率到每秒
@@ -2651,8 +2655,8 @@ int main(int argc, char *argv[])
             last_info_update = current_time;
         }
 
-        // 增加休眠时间：大幅降低CPU占用
-        usleep(5000); // 统一休眠5ms，降低循环频率
+        // 进一步优化休眠时间：减少到1ms以获得最高响应性
+        usleep(1000); // 1ms休眠，最大化循环频率
     }
 
     printf("Main loop exited, shutting down...\n");
