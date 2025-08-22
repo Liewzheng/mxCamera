@@ -30,6 +30,7 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <ctype.h>
@@ -743,6 +744,7 @@ void print_usage(const char *program_name)
     printf("\nOptions:\n");
     printf("  --width WIDTH      Set camera width (default: %d)\n", DEFAULT_CAMERA_WIDTH);
     printf("  --height HEIGHT    Set camera height (default: %d)\n", DEFAULT_CAMERA_HEIGHT);
+    printf("  --enable-tcp       Enable TCP transmission on startup\n");
     printf("  --tcp-port PORT    Set TCP server port (default: %d)\n", DEFAULT_PORT);
     printf("  --tcp-ip IP        Set TCP server IP (default: %s)\n", DEFAULT_SERVER_IP);
     printf("  --help, -h         Show this help message\n");
@@ -799,6 +801,11 @@ int parse_arguments(int argc, char *argv[])
                 printf("Error: Invalid height %d (must be 1-4096)\n", camera_height);
                 return -1;
             }
+        }
+        else if (strcmp(argv[i], "--enable-tcp") == 0)
+        {
+            tcp_enabled = 1;
+            printf("TCP transmission enabled via command line\n");
         }
         else if (strcmp(argv[i], "--tcp-port") == 0)
         {
@@ -2283,6 +2290,23 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
+    // 在创建会话之前，检查设备是否可用
+    printf("Checking camera device availability...\n");
+    
+    // 尝试简单打开和关闭设备来检查可用性
+    int test_fd = open(DEFAULT_CAMERA_DEVICE, O_RDWR);
+    if (test_fd < 0)
+    {
+        printf("Error: Cannot open camera device %s: %s\n", DEFAULT_CAMERA_DEVICE, strerror(errno));
+        printf("Please check if:\n");
+        printf("1. The camera device exists\n");
+        printf("2. No other process is using the camera\n");
+        printf("3. You have proper permissions\n");
+        goto cleanup;
+    }
+    close(test_fd);
+    printf("Camera device %s is accessible\n", DEFAULT_CAMERA_DEVICE);
+
     // 配置摄像头会话 (使用命令行参数或默认值)
     media_session_config_t config = {
         .device_path = DEFAULT_CAMERA_DEVICE,
@@ -2540,9 +2564,15 @@ cleanup:
     // 清理当前帧数据
     printf("Cleaning up frame data...\n");
     pthread_mutex_lock(&frame_mutex);
-    if (current_frame.data)
+    if (current_frame.data && media_session)  // 确保 media_session 不为 NULL
     {
         libmedia_session_release_frame(media_session, &current_frame);
+        current_frame.data = NULL;
+    }
+    else if (current_frame.data)
+    {
+        // 如果 media_session 为 NULL 但有帧数据，只清空指针
+        printf("Warning: Clearing frame data without media session\n");
         current_frame.data = NULL;
     }
     pthread_mutex_unlock(&frame_mutex);
