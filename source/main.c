@@ -576,13 +576,31 @@ void start_auto_control_mode(void)
     auto_control_thread_running = 1;
     auto_control_running = true;
 
-    if (pthread_create(&auto_control_thread_id, NULL, auto_control_thread, NULL) != 0)
+    // 创建自动控制线程 (低优先级)
+    pthread_attr_t auto_attr;
+    struct sched_param auto_param;
+    
+    pthread_attr_init(&auto_attr);
+    pthread_attr_setdetachstate(&auto_attr, PTHREAD_CREATE_JOINABLE);
+    
+    // 设置调度策略为SCHED_OTHER，最低优先级
+    pthread_attr_setschedpolicy(&auto_attr, SCHED_OTHER);
+    auto_param.sched_priority = 0;  // SCHED_OTHER的最低优先级
+    pthread_attr_setschedparam(&auto_attr, &auto_param);
+    pthread_attr_setinheritsched(&auto_attr, PTHREAD_EXPLICIT_SCHED);
+    
+    printf("Setting auto control thread priority to: %d (SCHED_OTHER)\n", auto_param.sched_priority);
+    
+    if (pthread_create(&auto_control_thread_id, &auto_attr, auto_control_thread, NULL) != 0)
     {
         printf("错误: 创建自动控制线程失败\n");
         auto_control_thread_running = 0;
         auto_control_running = false;
+        pthread_attr_destroy(&auto_attr);
         return;
     }
+    
+    pthread_attr_destroy(&auto_attr);
 }
 
 /**
@@ -818,6 +836,21 @@ int parse_arguments(int argc, char *argv[])
         {
             tcp_enabled = 1;
             printf("TCP transmission enabled via command line\n");
+            printf("Automatically switching USB mode to RNDIS for TCP transmission...\n");
+            
+            // 自动切换USB模式到RNDIS
+            if (set_usb_mode(USB_MODE_RNDIS) != 0)
+            {
+                printf("Warning: Failed to switch USB mode to RNDIS\n");
+                printf("TCP transmission may not work properly without RNDIS mode\n");
+            }
+            else
+            {
+                printf("USB mode switched to RNDIS successfully\n");
+                // 等待USB模式切换完成
+                printf("Waiting for USB configuration to take effect...\n");
+                sleep(3); // 等待3秒让USB重新配置
+            }
         }
         else if (strcmp(argv[i], "--tcp-port") == 0)
         {
@@ -1699,6 +1732,15 @@ void *camera_thread(void *arg)
 {
     printf("Camera thread started (always running)\n");
     
+    // 确认当前线程的调度策略和优先级
+    int policy;
+    struct sched_param param;
+    pthread_getschedparam(pthread_self(), &policy, &param);
+    printf("Camera thread running with policy: %s, priority: %d\n",
+           (policy == SCHED_FIFO) ? "SCHED_FIFO" : 
+           (policy == SCHED_RR) ? "SCHED_RR" : "SCHED_OTHER",
+           param.sched_priority);
+    
     // 设置线程取消状态
     pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
@@ -2413,13 +2455,38 @@ int main(int argc, char *argv[])
     // 初始化屏幕活动时间
     update_activity_time();
 
-    // 启动摄像头采集线程
+    // 启动摄像头采集线程 (最高优先级)
     pthread_t camera_tid;
-    if (pthread_create(&camera_tid, NULL, camera_thread, NULL) != 0)
+    pthread_attr_t camera_attr;
+    struct sched_param camera_param;
+    
+    // 初始化线程属性
+    pthread_attr_init(&camera_attr);
+    pthread_attr_setdetachstate(&camera_attr, PTHREAD_CREATE_JOINABLE);
+    
+    // 设置调度策略为FIFO，优先级最高
+    pthread_attr_setschedpolicy(&camera_attr, SCHED_FIFO);
+    camera_param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+    pthread_attr_setschedparam(&camera_attr, &camera_param);
+    pthread_attr_setinheritsched(&camera_attr, PTHREAD_EXPLICIT_SCHED);
+    
+    printf("Setting camera thread priority to: %d (SCHED_FIFO)\n", camera_param.sched_priority);
+    
+    if (pthread_create(&camera_tid, &camera_attr, camera_thread, NULL) != 0)
     {
-        printf("Failed to create camera thread\n");
-        goto cleanup;
+        printf("Failed to create camera thread with high priority, trying normal priority...\n");
+        // 如果高优先级失败，尝试默认优先级
+        pthread_attr_destroy(&camera_attr);
+        pthread_attr_init(&camera_attr);
+        if (pthread_create(&camera_tid, &camera_attr, camera_thread, NULL) != 0)
+        {
+            printf("Failed to create camera thread\n");
+            pthread_attr_destroy(&camera_attr);
+            goto cleanup;
+        }
     }
+    
+    pthread_attr_destroy(&camera_attr);
 
     // 如果命令行启用了TCP，启动TCP服务器线程
     if (tcp_enabled)
@@ -2430,18 +2497,45 @@ int main(int argc, char *argv[])
         server_fd = create_server(DEFAULT_PORT);
         if (server_fd >= 0)
         {
-            // 创建TCP发送线程
-            if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0)
+            pthread_attr_t tcp_attr;
+            struct sched_param tcp_param;
+            
+            // 初始化TCP线程属性
+            pthread_attr_init(&tcp_attr);
+            pthread_attr_setdetachstate(&tcp_attr, PTHREAD_CREATE_JOINABLE);
+            
+            // 设置调度策略为FIFO，中等优先级
+            pthread_attr_setschedpolicy(&tcp_attr, SCHED_FIFO);
+            tcp_param.sched_priority = sched_get_priority_max(SCHED_FIFO) / 2;
+            pthread_attr_setschedparam(&tcp_attr, &tcp_param);
+            pthread_attr_setinheritsched(&tcp_attr, PTHREAD_EXPLICIT_SCHED);
+            
+            printf("Setting TCP thread priority to: %d (SCHED_FIFO)\n", tcp_param.sched_priority);
+            
+            if (pthread_create(&tcp_thread_id, &tcp_attr, tcp_sender_thread, NULL) == 0)
             {
-                printf("TCP server started successfully\n");
+                printf("TCP server started successfully with priority %d\n", tcp_param.sched_priority);
             }
             else
             {
-                printf("Failed to create TCP thread\n");
-                close(server_fd);
-                server_fd = -1;
-                tcp_enabled = 0;
+                printf("Failed to create TCP thread with priority, trying normal priority...\n");
+                // 如果优先级设置失败，尝试默认优先级
+                pthread_attr_destroy(&tcp_attr);
+                pthread_attr_init(&tcp_attr);
+                if (pthread_create(&tcp_thread_id, &tcp_attr, tcp_sender_thread, NULL) == 0)
+                {
+                    printf("TCP server started successfully with normal priority\n");
+                }
+                else
+                {
+                    printf("Failed to create TCP thread\n");
+                    close(server_fd);
+                    server_fd = -1;
+                    tcp_enabled = 0;
+                }
             }
+            
+            pthread_attr_destroy(&tcp_attr);
         }
         else
         {
@@ -2451,6 +2545,19 @@ int main(int argc, char *argv[])
     }
 
     printf("System initialized successfully\n");
+    
+    // 设置主线程为低优先级，让摄像头线程优先执行
+    struct sched_param main_param;
+    main_param.sched_priority = 0;  // 最低优先级
+    if (pthread_setschedparam(pthread_self(), SCHED_OTHER, &main_param) == 0)
+    {
+        printf("Main thread priority set to: %d (SCHED_OTHER)\n", main_param.sched_priority);
+    }
+    else
+    {
+        printf("Warning: Failed to set main thread priority\n");
+    }
+    
     printf("Display: %dx%d (forced landscape mode)\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
     printf("Camera: %dx%d (RAW10) on %s\n", camera_width, camera_height, DEFAULT_CAMERA_DEVICE);
     printf("Scaling: Width-aligned to %d px, maintaining aspect ratio\n", DISPLAY_WIDTH);
@@ -3056,23 +3163,48 @@ void menu_confirm_selection(void)
 
         if (tcp_enabled)
         {
-            // 启动TCP传输
+            // 启动TCP传输 (中等优先级)
             if (server_fd < 0)
             {
                 server_fd = create_server(DEFAULT_PORT);
                 if (server_fd >= 0)
                 {
-                    if (pthread_create(&tcp_thread_id, NULL, tcp_sender_thread, NULL) == 0)
+                    pthread_attr_t tcp_attr;
+                    struct sched_param tcp_param;
+                    
+                    pthread_attr_init(&tcp_attr);
+                    pthread_attr_setdetachstate(&tcp_attr, PTHREAD_CREATE_JOINABLE);
+                    
+                    // 设置调度策略为FIFO，中等优先级
+                    pthread_attr_setschedpolicy(&tcp_attr, SCHED_FIFO);
+                    tcp_param.sched_priority = sched_get_priority_max(SCHED_FIFO) / 2;
+                    pthread_attr_setschedparam(&tcp_attr, &tcp_param);
+                    pthread_attr_setinheritsched(&tcp_attr, PTHREAD_EXPLICIT_SCHED);
+                    
+                    if (pthread_create(&tcp_thread_id, &tcp_attr, tcp_sender_thread, NULL) == 0)
                     {
-                        printf("Menu: TCP server started successfully\n");
+                        printf("Menu: TCP server started successfully with priority %d\n", tcp_param.sched_priority);
                     }
                     else
                     {
-                        printf("Menu: Failed to create TCP thread\n");
-                        close(server_fd);
-                        server_fd = -1;
-                        tcp_enabled = 0;
+                        printf("Menu: Failed to create TCP thread with priority, trying normal...\n");
+                        // 如果优先级设置失败，尝试默认优先级
+                        pthread_attr_destroy(&tcp_attr);
+                        pthread_attr_init(&tcp_attr);
+                        if (pthread_create(&tcp_thread_id, &tcp_attr, tcp_sender_thread, NULL) == 0)
+                        {
+                            printf("Menu: TCP server started successfully with normal priority\n");
+                        }
+                        else
+                        {
+                            printf("Menu: Failed to create TCP thread\n");
+                            close(server_fd);
+                            server_fd = -1;
+                            tcp_enabled = 0;
+                        }
                     }
+                    
+                    pthread_attr_destroy(&tcp_attr);
                 }
                 else
                 {
