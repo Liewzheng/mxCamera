@@ -11,7 +11,7 @@
 
 DAEMON_PATH="/root/Workspace"
 DAEMON="mxCamera"
-DAEMON_ARGS="--width 1920 --height 1080"
+DAEMON_ARGS="--width 1920 --height 1080 --enable-tcp"
 PIDFILE="/var/run/mxcamera.pid"
 
 case "$1" in
