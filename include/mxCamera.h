@@ -273,5 +273,9 @@ int is_ina219_initialized(void);
 int init_subsystem(void);
 void cleanup_subsystem(void);
 void update_subsys_status_display(void);
+// 子系统状态显示函数声明
+void show_subsys_on_status(void);
+void show_subsys_off_status(void);
+void hide_subsys_status_delayed(void);
 
 #endif /* _MXCAMERA_H_ */

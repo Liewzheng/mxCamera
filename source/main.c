@@ -176,6 +176,7 @@ static lv_obj_t *menu_exposure_btn = NULL;    // EXPOSURE 按钮
 static lv_obj_t *menu_gain_btn = NULL;        // GAIN 按钮
 static lv_obj_t *menu_usb_config_btn = NULL;  // USB CONFIG 按钮
 // static lv_obj_t* menu_close_btn = NULL;  // 关闭按钮
+static lv_obj_t *subsys_status_label = NULL;  // 子系统状态标签 (新增)
 
 // 帧率统计
 static uint32_t frame_count = 0;
@@ -410,6 +411,7 @@ offline_mode:
 void *auto_control_thread(void *arg)
 {
     (void)arg;
+    int result = 0;
 
     printf("自动控制线程已启动（包含设备监控功能）\n");
 
@@ -423,27 +425,10 @@ void *auto_control_thread(void *arg)
         return NULL;
     }
 
-    // 启动气泵
+    // 启动加热片1
     if (subsys_handle)
     {
-        int result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, true);
-        if (result == 0)
-        {
-            printf("自动控制：气泵已启动（持续运行）\n");
-        }
-        else
-        {
-            printf("错误: 气泵启动失败，自动控制将退出\n");
-            auto_control_thread_running = 0;
-            auto_control_running = false;
-            return NULL;
-        }
-    }
-
-    // 启动加热片
-    if (subsys_handle)
-    {
-        int result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, true);
+        result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, true);
         if (result == 0)
         {
             printf("自动控制：加热片1已启动（持续运行）\n");
@@ -456,6 +441,36 @@ void *auto_control_thread(void *arg)
             return NULL;
         }
 
+        for(int i = 0; i< 30; i++)
+        {
+            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            {
+                gettimeofday(&last_subsys_update, NULL);
+            }
+
+            // 如果收到停止信号，则提前退出
+            if (!auto_control_thread_running && exit_flag)
+            {
+                usleep(200000); // 0.2秒
+                goto EXIT;
+            }
+            else
+            {
+                sleep(1);
+            }
+
+            if ((double)(device_info.temp1) > 30.0 && device_info.heater1_status == SUBSYS_STATUS_ON)
+            {
+                printf("警告: 加热片1温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp1));
+                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+                break;
+            }
+        }
+    }
+
+    // 启动加热片2
+    if (subsys_handle)
+    {
         result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, true);
         if (result == 0)
         {
@@ -468,6 +483,32 @@ void *auto_control_thread(void *arg)
             auto_control_running = false;
             return NULL;
         }
+
+        printf("等待50秒，以加热 HEATER2 至60摄氏度");
+        for(int i = 0; i< 50; i++)
+        {
+            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            {
+                gettimeofday(&last_subsys_update, NULL);
+            }
+
+            if (!auto_control_thread_running && exit_flag)
+            {
+                usleep(200000); // 0.2秒
+                goto EXIT;
+            }
+            else
+            {
+                sleep(1);
+            }
+
+            if ((double)(device_info.temp2) > 60.0 && device_info.heater2_status == SUBSYS_STATUS_ON)
+            {
+                printf("警告: 加热片2温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp2));
+                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+                break;
+            }
+        }
     }
 
     while (auto_control_thread_running && !exit_flag)
@@ -477,6 +518,26 @@ void *auto_control_thread(void *arg)
             printf("警告: 子系统不可用，等待重连...\n");
             sleep(2);
             continue;
+        }
+        else
+        {
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, true);
+            if (result == 0)
+            {
+                printf("自动控制：气泵已启动（持续运行）\n");
+            }
+            else
+            {
+                printf("错误: 气泵启动失败，自动控制将退出\n");
+                auto_control_thread_running = 0;
+                auto_control_running = false;
+                return NULL;
+            }
+
+            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            {
+                gettimeofday(&last_subsys_update, NULL);
+            }
         }
 
         // 在间隔期间监控设备状态和执行温度控制
@@ -500,7 +561,7 @@ void *auto_control_thread(void *arg)
         }
 
         // 开启激光
-        int result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, true);
+        result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, true);
         if (result == 0)
         {
             printf("自动控制：激光开启\n");
@@ -533,23 +594,79 @@ void *auto_control_thread(void *arg)
             printf("警告: 激光关闭失败\n");
         }
 
+        if ((double)(device_info.temp2) > 60.0)
+        {
+            if (device_info.heater2_status == SUBSYS_STATUS_ON)
+            {
+                printf("警告: 加热片2温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp2));
+                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+            }
+        }
+        else if ((double)(device_info.temp2) < 55.0)
+        {
+            if (device_info.heater2_status == SUBSYS_STATUS_OFF)
+            {
+                printf("警告: 加热片2温度过低（%.1f°C），正在提高功率\n", (double)(device_info.temp2));
+                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, true);
+            }
+        }
+
+        if ((double)(device_info.temp1) > 35.0)
+        {
+            if (device_info.heater1_status == SUBSYS_STATUS_ON)
+            {
+                printf("警告: 加热片1温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp1));
+                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+            }
+        }
+        else if ((double)(device_info.temp1) < 28.0)
+        {
+            if (device_info.heater1_status == SUBSYS_STATUS_OFF)
+            {
+                printf("警告: 加热片1温度过低（%.1f°C），正在提高功率\n", (double)(device_info.temp1));
+                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, true);
+            }
+        }
     }
+
+EXIT:
 
     // 清理：关闭所有设备
     if (subsys_handle)
     {
         printf("自动控制：正在关闭所有设备...\n");
-        subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
-        subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
-        subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
-        subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
-        printf("自动控制：所有设备已关闭\n");
 
-        // 获取设备状态信息
+        // 在退出阶段先获取从设备状态
         if (subsys_get_device_info(subsys_handle, &device_info) == 0)
         {
             gettimeofday(&last_subsys_update, NULL);
         }
+
+        // 根据对应设备状态逐个关闭，不要在未开启状态关闭设备，可能导致复位
+        if (device_info.heater1_status == SUBSYS_STATUS_ON)
+        {
+            subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+        }
+        if (device_info.heater2_status == SUBSYS_STATUS_ON)
+        {
+            subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+        }
+        if (device_info.laser_status == SUBSYS_STATUS_ON)
+        {
+            subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+        }
+        if (device_info.pump_status == SUBSYS_STATUS_ON)
+        {
+            subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+        }
+
+        // 最后再更新一遍从设备状态
+        if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+        {
+            gettimeofday(&last_subsys_update, NULL);
+        }
+
+        printf("自动控制：所有设备已关闭\n");
     }
 
     printf("自动控制线程已退出\n");
@@ -572,6 +689,9 @@ void start_auto_control_mode(void)
         printf("自动控制已在运行中\n");
         return;
     }
+
+    // 显示子系统开启状态
+    show_subsys_on_status();
 
     auto_control_thread_running = 1;
     auto_control_running = true;
@@ -596,6 +716,10 @@ void start_auto_control_mode(void)
         printf("错误: 创建自动控制线程失败\n");
         auto_control_thread_running = 0;
         auto_control_running = false;
+        
+        // 创建失败时显示关闭状态
+        show_subsys_off_status();
+        
         pthread_attr_destroy(&auto_attr);
         return;
     }
@@ -622,6 +746,9 @@ void stop_auto_control_mode(void)
     pthread_join(auto_control_thread_id, NULL);
 
     auto_control_running = false;
+
+    // 显示子系统关闭状态
+    show_subsys_off_status();
 
     printf("自动控制模式已停止\n");
 }
@@ -763,6 +890,71 @@ void update_subsys_status_display(void)
         lv_obj_set_style_text_color(heater2_status_label, lv_color_white(), 0);
     }
     lv_label_set_text(heater2_status_label, heater2_text);
+}
+
+/**
+ * @brief 显示子系统开启状态
+ */
+void show_subsys_on_status(void)
+{
+    if (!subsys_status_label || !screen_on)
+        return;
+
+    lv_label_set_text(subsys_status_label, "SUBSYS ON");
+    lv_obj_set_style_text_color(subsys_status_label, lv_color_make(0, 255, 0), 0);  // 绿色字体
+    lv_obj_set_style_bg_color(subsys_status_label, lv_color_make(0, 40, 0), 0);     // 深绿背景
+    lv_obj_set_style_border_color(subsys_status_label, lv_color_make(0, 255, 0), 0); // 绿色边框
+    lv_obj_clear_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);
+    
+    printf("GUI: Showing SUBSYS ON status\n");
+}
+
+/**
+ * @brief 显示子系统关闭状态
+ */
+void show_subsys_off_status(void)
+{
+    if (!subsys_status_label || !screen_on)
+        return;
+
+    lv_label_set_text(subsys_status_label, "SUBSYS OFF");
+    lv_obj_set_style_text_color(subsys_status_label, lv_color_make(255, 0, 0), 0);  // 红色字体
+    lv_obj_set_style_bg_color(subsys_status_label, lv_color_make(40, 0, 0), 0);     // 深红背景
+    lv_obj_set_style_border_color(subsys_status_label, lv_color_make(255, 0, 0), 0); // 红色边框
+    lv_obj_clear_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);
+    
+    printf("GUI: Showing SUBSYS OFF status\n");
+}
+
+/**
+ * @brief 隐藏子系统状态显示 (延迟隐藏)
+ */
+void hide_subsys_status_delayed(void)
+{
+    if (!subsys_status_label)
+        return;
+    
+    // 使用简单的延时隐藏机制
+    static struct timeval show_time;
+    static int status_shown = 0;
+    
+    if (!status_shown) {
+        gettimeofday(&show_time, NULL);
+        status_shown = 1;
+        return;
+    }
+    
+    struct timeval current_time;
+    gettimeofday(&current_time, NULL);
+    long time_diff = (current_time.tv_sec - show_time.tv_sec) * 1000000 +
+                     (current_time.tv_usec - show_time.tv_usec);
+    
+    // 2秒后隐藏
+    if (time_diff >= 2000000) {
+        lv_obj_add_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);
+        status_shown = 0;
+        printf("GUI: Hiding SUBSYS status after 2 seconds\n");
+    }
 }
 
 /**
@@ -1174,6 +1366,8 @@ void turn_screen_off(void)
         lv_obj_add_flag(time_label, LV_OBJ_FLAG_HIDDEN);
     if (subsys_panel)
         lv_obj_add_flag(subsys_panel, LV_OBJ_FLAG_HIDDEN);
+    if (subsys_status_label)  // 新增：隐藏子系统状态标签
+        lv_obj_add_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);
     if (menu_panel)
     {
         lv_obj_add_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
@@ -2113,6 +2307,21 @@ void init_lvgl_ui(void)
     lv_obj_set_style_pad_all(time_label, 2, 0);
     lv_obj_align(time_label, LV_ALIGN_TOP_RIGHT, -5, 5);
 
+    // 创建子系统状态显示标签 (屏幕中央上方，用于显示 SUBSYS ON/OFF)
+    subsys_status_label = lv_label_create(scr);
+    lv_label_set_text(subsys_status_label, "SUBSYS OFF");
+    lv_obj_set_style_text_color(subsys_status_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(subsys_status_label, &lv_font_montserrat_14, 0);  // 使用标准字体
+    lv_obj_set_style_bg_color(subsys_status_label, lv_color_make(0, 0, 0), 0);
+    lv_obj_set_style_bg_opa(subsys_status_label, LV_OPA_80, 0);  // 更不透明的背景
+    lv_obj_set_style_border_color(subsys_status_label, lv_color_white(), 0);
+    lv_obj_set_style_border_width(subsys_status_label, 2, 0);
+    lv_obj_set_style_border_opa(subsys_status_label, LV_OPA_50, 0);
+    lv_obj_set_style_radius(subsys_status_label, 8, 0);
+    lv_obj_set_style_pad_all(subsys_status_label, 8, 0);
+    lv_obj_align(subsys_status_label, LV_ALIGN_TOP_MID, 0, 40);  // 屏幕上方中央
+    lv_obj_add_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);  // 初始隐藏
+
     // 底部状态标签已关闭显示
     // status_label = lv_label_create(scr);
     // tcp_label = lv_label_create(scr);
@@ -2652,6 +2861,10 @@ int main(int argc, char *argv[])
         { // 1秒
             update_system_info();
             update_time_display();
+            
+            // 检查是否需要隐藏子系统状态
+            hide_subsys_status_delayed();
+            
             last_info_update = current_time;
         }
 
