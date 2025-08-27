@@ -280,6 +280,12 @@ void *auto_control_thread(void *arg);
 void start_auto_control_mode(void);
 void stop_auto_control_mode(void);
 
+// 子系统状态显示函数声明
+void show_subsys_on_status(void);
+void show_subsys_off_status(void);
+void show_subsys_off_status_user(void);
+void hide_subsys_status_delayed(void);
+
 /**
  * @brief 初始化子系统通信
  * @return 0=成功，-1=失败
@@ -307,6 +313,12 @@ int init_subsystem(void)
         printf("将以离线模式运行\n");
         goto offline_mode;
     }
+
+    // 增强子系统通信配置 - 更高的重试次数和延迟
+    printf("配置子系统通信参数...\n");
+    subsys_set_max_retry_times(subsys_handle, 8);  // 增加到8次重试
+    subsys_set_retry_delay(subsys_handle, 100);    // 100ms重试延迟
+    printf("已设置子系统重试次数: 8次，重试延迟: 100ms\n");
 
     // 检查子系统版本（带超时）
     printf("检查子系统版本...\n");
@@ -387,6 +399,13 @@ int init_subsystem(void)
     // 初始化时间戳
     gettimeofday(&last_subsys_update, NULL);
 
+    result = subsys_reset_all_devices(subsys_handle);
+    if (result != 0)
+    {
+        printf("错误: 重置所有设备失败，错误代码: %d\n", result);
+        goto offline_mode;
+    }
+
     printf("子系统通信初始化完成\n");
     return 0;
 
@@ -412,6 +431,7 @@ void *auto_control_thread(void *arg)
 {
     (void)arg;
     int result = 0;
+    bool error_exit = false; // 标志是否因错误退出
 
     printf("自动控制线程已启动（包含设备监控功能）\n");
 
@@ -435,12 +455,30 @@ void *auto_control_thread(void *arg)
         }
         else
         {
-            printf("错误: 加热片1启动失败，自动控制将退出\n");
-            auto_control_thread_running = 0;
-            auto_control_running = false;
-            return NULL;
+            // 获取详细错误信息
+            const char* error_info = subsys_get_last_error(subsys_handle);
+            printf("错误: 加热片1启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+            
+            // 检查是否是"已在运行"错误，如果是则检查设备状态
+            if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
+            {
+                // 更新设备状态并检查加热片1是否确实在运行
+                if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+                {
+                    if (device_info.heater1_status == SUBSYS_STATUS_ON)
+                    {
+                        printf("自动控制：加热片1已在运行中，继续执行\n");
+                        gettimeofday(&last_subsys_update, NULL);
+                        goto HEATER1_RUNNING; // 跳转到加热片1运行逻辑
+                    }
+                }
+            }
+            
+            error_exit = true;
+            goto EXIT;
         }
 
+HEATER1_RUNNING:
         for(int i = 0; i< 30; i++)
         {
             if (subsys_get_device_info(subsys_handle, &device_info) == 0)
@@ -478,12 +516,30 @@ void *auto_control_thread(void *arg)
         }
         else
         {
-            printf("错误: 加热片2启动失败，自动控制将退出\n");
-            auto_control_thread_running = 0;
-            auto_control_running = false;
-            return NULL;
+            // 获取详细错误信息
+            const char* error_info = subsys_get_last_error(subsys_handle);
+            printf("错误: 加热片2启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+            
+            // 检查是否是"已在运行"错误，如果是则检查设备状态
+            if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
+            {
+                // 更新设备状态并检查加热片2是否确实在运行
+                if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+                {
+                    if (device_info.heater2_status == SUBSYS_STATUS_ON)
+                    {
+                        printf("自动控制：加热片2已在运行中，继续执行\n");
+                        gettimeofday(&last_subsys_update, NULL);
+                        goto HEATER2_RUNNING; // 跳转到加热片2运行逻辑
+                    }
+                }
+            }
+            
+            error_exit = true;
+            goto EXIT;
         }
 
+HEATER2_RUNNING:
         printf("等待50秒，以加热 HEATER2 至60摄氏度");
         for(int i = 0; i< 50; i++)
         {
@@ -528,10 +584,27 @@ void *auto_control_thread(void *arg)
             }
             else
             {
-                printf("错误: 气泵启动失败，自动控制将退出\n");
-                auto_control_thread_running = 0;
-                auto_control_running = false;
-                return NULL;
+                // 获取详细错误信息
+                const char* error_info = subsys_get_last_error(subsys_handle);
+                printf("错误: 气泵启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                
+                // 检查是否是"已在运行"错误，如果是则检查设备状态
+                if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
+                {
+                    // 更新设备状态并检查气泵是否确实在运行
+                    if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+                    {
+                        if (device_info.pump_status == SUBSYS_STATUS_ON)
+                        {
+                            printf("自动控制：气泵已在运行中，继续执行\n");
+                            gettimeofday(&last_subsys_update, NULL);
+                            goto PUMP_RUNNING; // 跳转到气泵运行逻辑
+                        }
+                    }
+                }
+                
+                error_exit = true;
+                goto EXIT;
             }
 
             if (subsys_get_device_info(subsys_handle, &device_info) == 0)
@@ -540,6 +613,7 @@ void *auto_control_thread(void *arg)
             }
         }
 
+PUMP_RUNNING:
         // 在间隔期间监控设备状态和执行温度控制
         printf("自动控制：激光关闭，等待1.5秒并监控设备状态...\n");
 
@@ -645,20 +719,43 @@ EXIT:
         // 根据对应设备状态逐个关闭，不要在未开启状态关闭设备，可能导致复位
         if (device_info.heater1_status == SUBSYS_STATUS_ON)
         {
-            subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+            if (result != 0)
+            {
+                const char* error_info = subsys_get_last_error(subsys_handle);
+                printf("警告: 关闭加热片1失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+            }
         }
         if (device_info.heater2_status == SUBSYS_STATUS_ON)
         {
-            subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+            if (result != 0)
+            {
+                const char* error_info = subsys_get_last_error(subsys_handle);
+                printf("警告: 关闭加热片2失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+            }
         }
         if (device_info.laser_status == SUBSYS_STATUS_ON)
         {
-            subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+            if (result != 0)
+            {
+                const char* error_info = subsys_get_last_error(subsys_handle);
+                printf("警告: 关闭激光失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+            }
         }
         if (device_info.pump_status == SUBSYS_STATUS_ON)
         {
-            subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+            if (result != 0)
+            {
+                const char* error_info = subsys_get_last_error(subsys_handle);
+                printf("警告: 关闭气泵失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+            }
         }
+
+        auto_control_thread_running = 0;
+        auto_control_running = false;
 
         // 最后再更新一遍从设备状态
         if (subsys_get_device_info(subsys_handle, &device_info) == 0)
@@ -667,6 +764,19 @@ EXIT:
         }
 
         printf("自动控制：所有设备已关闭\n");
+    }
+
+    // 根据退出原因显示相应状态
+    if (error_exit)
+    {
+        // 错误退出时显示红色状态
+        show_subsys_off_status();
+        printf("自动控制线程因错误退出\n");
+    }
+    else
+    {
+        // 正常退出时不显示状态（由stop_auto_control_mode函数显示绿色状态）
+        printf("自动控制线程正常退出\n");
     }
 
     printf("自动控制线程已退出\n");
@@ -747,8 +857,8 @@ void stop_auto_control_mode(void)
 
     auto_control_running = false;
 
-    // 显示子系统关闭状态
-    show_subsys_off_status();
+    // 显示子系统关闭状态（用户主动退出 - 绿色）
+    show_subsys_off_status_user();
 
     printf("自动控制模式已停止\n");
 }
@@ -910,7 +1020,7 @@ void show_subsys_on_status(void)
 }
 
 /**
- * @brief 显示子系统关闭状态
+ * @brief 显示子系统关闭状态（错误退出 - 红色）
  */
 void show_subsys_off_status(void)
 {
@@ -923,7 +1033,24 @@ void show_subsys_off_status(void)
     lv_obj_set_style_border_color(subsys_status_label, lv_color_make(255, 0, 0), 0); // 红色边框
     lv_obj_clear_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);
     
-    printf("GUI: Showing SUBSYS OFF status\n");
+    printf("GUI: Showing SUBSYS OFF status (error exit - red)\n");
+}
+
+/**
+ * @brief 显示子系统关闭状态（用户主动退出 - 绿色）
+ */
+void show_subsys_off_status_user(void)
+{
+    if (!subsys_status_label || !screen_on)
+        return;
+
+    lv_label_set_text(subsys_status_label, "SUBSYS OFF");
+    lv_obj_set_style_text_color(subsys_status_label, lv_color_make(0, 255, 0), 0);  // 绿色字体
+    lv_obj_set_style_bg_color(subsys_status_label, lv_color_make(0, 40, 0), 0);     // 深绿背景
+    lv_obj_set_style_border_color(subsys_status_label, lv_color_make(0, 255, 0), 0); // 绿色边框
+    lv_obj_clear_flag(subsys_status_label, LV_OBJ_FLAG_HIDDEN);
+    
+    printf("GUI: Showing SUBSYS OFF status (user exit - green)\n");
 }
 
 /**
