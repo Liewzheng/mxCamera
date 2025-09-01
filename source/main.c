@@ -49,6 +49,7 @@
 // TCP 传输相关数据结构 (参考 media_usb)
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>  // 为TCP_NODELAY添加
 #include <sys/socket.h>
 #include <sys/select.h>
 
@@ -80,7 +81,7 @@ static int camera_height = DEFAULT_CAMERA_HEIGHT;
 #define DEFAULT_PORT 8888
 #define DEFAULT_SERVER_IP "172.32.0.93"
 #define HEADER_SIZE 32
-#define CHUNK_SIZE 65536
+#define CHUNK_SIZE 1048576  // 增加到1MB以减少系统调用次数，提高传输效率
 
 // 动态图像尺寸 (根据摄像头宽高比计算)
 static int current_img_width = DISPLAY_WIDTH;
@@ -197,6 +198,19 @@ static int32_t gain_value = 0;     // 增益值
 static int exposure_step = 16;     // 曝光调整步长
 static int gain_step = 32;         // 增益调整步长
 
+// 温度滑动窗口滤波
+#define TEMP_FILTER_WINDOW_SIZE 5  // 滑动窗口大小
+typedef struct {
+    float values[TEMP_FILTER_WINDOW_SIZE];  // 温度值数组
+    int index;                              // 当前索引
+    int count;                              // 已存储的值数量
+    float average;                          // 当前平均值
+    bool initialized;                       // 是否已初始化
+} temp_filter_t;
+
+static temp_filter_t temp1_filter = {0};   // 温度1滤波器
+static temp_filter_t temp2_filter = {0};   // 温度2滤波器
+
 // 配置管理
 static mxcamera_config_t current_config; // 当前配置
 static int config_loaded = 0;            // 配置是否已加载
@@ -286,6 +300,123 @@ void show_subsys_off_status(void);
 void show_subsys_off_status_user(void);
 void hide_subsys_status_delayed(void);
 
+// 温度滤波函数声明
+void init_temp_filter(temp_filter_t *filter);
+float update_temp_filter(temp_filter_t *filter, float new_value);
+float get_filtered_temp1(void);
+float get_filtered_temp2(void);
+int get_device_info_with_filter(subsys_handle_t handle, subsys_device_info_t *info);
+
+// ============================================================================
+// 温度滤波函数实现
+// ============================================================================
+
+/**
+ * @brief 初始化温度滤波器
+ * @param filter 滤波器指针
+ */
+void init_temp_filter(temp_filter_t *filter)
+{
+    if (!filter) return;
+    
+    memset(filter->values, 0, sizeof(filter->values));
+    filter->index = 0;
+    filter->count = 0;
+    filter->average = 0.0f;
+    filter->initialized = false;
+}
+
+/**
+ * @brief 更新温度滤波器并返回滤波后的值
+ * @param filter 滤波器指针
+ * @param new_value 新的温度值
+ * @return 滤波后的温度值
+ */
+float update_temp_filter(temp_filter_t *filter, float new_value)
+{
+    if (!filter) return new_value;
+    
+    // 检查温度值是否合理 (0-200°C范围)
+    if (new_value < 0.0f || new_value > 200.0f) {
+        // 如果温度值异常，返回当前平均值（如果已初始化）
+        if (filter->initialized) {
+            printf("警告: 检测到异常温度值 %.1f°C，使用滤波值 %.1f°C\n", (double)new_value, (double)(filter->average));
+            return filter->average;
+        } else {
+            // 如果还未初始化，使用一个合理的默认值
+            printf("警告: 检测到异常温度值 %.1f°C，使用默认值 25.0°C\n", (double)new_value);
+            return 25.0f;
+        }
+    }
+    
+    // 添加新值到滑动窗口
+    filter->values[filter->index] = new_value;
+    filter->index = (filter->index + 1) % TEMP_FILTER_WINDOW_SIZE;
+    
+    if (filter->count < TEMP_FILTER_WINDOW_SIZE) {
+        filter->count++;
+    }
+    
+    // 计算平均值
+    float sum = 0.0f;
+    for (int i = 0; i < filter->count; i++) {
+        sum += filter->values[i];
+    }
+    filter->average = sum / filter->count;
+    filter->initialized = true;
+    
+    return filter->average;
+}
+
+/**
+ * @brief 获取滤波后的温度1值
+ * @return 滤波后的温度值
+ */
+float get_filtered_temp1(void)
+{
+    if (temp1_filter.initialized) {
+        return temp1_filter.average;
+    } else {
+        return device_info.temp1; // 如果滤波器未初始化，返回原始值
+    }
+}
+
+/**
+ * @brief 获取滤波后的温度2值
+ * @return 滤波后的温度值
+ */
+float get_filtered_temp2(void)
+{
+    if (temp2_filter.initialized) {
+        return temp2_filter.average;
+    } else {
+        return device_info.temp2; // 如果滤波器未初始化，返回原始值
+    }
+}
+
+/**
+ * @brief 获取设备信息并更新温度滤波器
+ * @param handle 子系统句柄
+ * @param info 设备信息结构指针
+ * @return 0=成功，<0=失败
+ */
+int get_device_info_with_filter(subsys_handle_t handle, subsys_device_info_t *info)
+{
+    int result = subsys_get_device_info(handle, info);
+    if (result == 0) {
+        // 更新温度滤波器
+        if (info->temp1_valid) {
+            float filtered_temp1 = update_temp_filter(&temp1_filter, info->temp1);
+            info->temp1 = filtered_temp1; // 用滤波后的值替换原始值
+        }
+        if (info->temp2_valid) {
+            float filtered_temp2 = update_temp_filter(&temp2_filter, info->temp2);
+            info->temp2 = filtered_temp2; // 用滤波后的值替换原始值
+        }
+    }
+    return result;
+}
+
 /**
  * @brief 初始化子系统通信
  * @return 0=成功，-1=失败
@@ -293,6 +424,11 @@ void hide_subsys_status_delayed(void);
 int init_subsystem(void)
 {
     printf("初始化子系统通信...\n");
+
+    // 初始化温度滤波器
+    init_temp_filter(&temp1_filter);
+    init_temp_filter(&temp2_filter);
+    printf("温度滑动窗口滤波器已初始化（窗口大小: %d）\n", TEMP_FILTER_WINDOW_SIZE);
 
     // 检查串口设备是否存在
     if (access("/dev/ttyS4", F_OK) != 0)
@@ -316,8 +452,8 @@ int init_subsystem(void)
 
     // 增强子系统通信配置 - 更高的重试次数和延迟
     printf("配置子系统通信参数...\n");
-    subsys_set_max_retry_times(subsys_handle, 8);  // 增加到8次重试
-    subsys_set_retry_delay(subsys_handle, 100);    // 100ms重试延迟
+    subsys_set_max_retry_times(subsys_handle, 3);  // 增加到8次重试
+    subsys_set_retry_delay(subsys_handle, 20);    // 100ms重试延迟
     printf("已设置子系统重试次数: 8次，重试延迟: 100ms\n");
 
     // 检查子系统版本（带超时）
@@ -371,7 +507,10 @@ int init_subsystem(void)
             goto offline_mode;
         }
     }
-
+    else
+    {
+        goto offline_mode;
+    }
     // 等待一段时间后再查询MCU序列号，避免命令冲突
     usleep(200000); // 等待200ms
 
@@ -387,6 +526,7 @@ int init_subsystem(void)
     else
     {
         printf("警告: 获取MCU序列号失败，错误代码: %d\n", result);
+        goto offline_mode;
     }
 
     // 初始化设备状态
@@ -463,7 +603,7 @@ void *auto_control_thread(void *arg)
             if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
             {
                 // 更新设备状态并检查加热片1是否确实在运行
-                if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+                if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
                 {
                     if (device_info.heater1_status == SUBSYS_STATUS_ON)
                     {
@@ -481,7 +621,7 @@ void *auto_control_thread(void *arg)
 HEATER1_RUNNING:
         for(int i = 0; i< 30; i++)
         {
-            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
             }
@@ -524,7 +664,7 @@ HEATER1_RUNNING:
             if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
             {
                 // 更新设备状态并检查加热片2是否确实在运行
-                if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+                if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
                 {
                     if (device_info.heater2_status == SUBSYS_STATUS_ON)
                     {
@@ -543,7 +683,7 @@ HEATER2_RUNNING:
         printf("等待50秒，以加热 HEATER2 至60摄氏度");
         for(int i = 0; i< 50; i++)
         {
-            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
             }
@@ -592,7 +732,7 @@ HEATER2_RUNNING:
                 if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
                 {
                     // 更新设备状态并检查气泵是否确实在运行
-                    if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+                    if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
                     {
                         if (device_info.pump_status == SUBSYS_STATUS_ON)
                         {
@@ -607,7 +747,7 @@ HEATER2_RUNNING:
                 goto EXIT;
             }
 
-            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
             }
@@ -623,7 +763,7 @@ PUMP_RUNNING:
             usleep(500000); // 0.5秒
 
             // 获取设备状态信息
-            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
             }
@@ -651,7 +791,7 @@ PUMP_RUNNING:
             usleep(500000); // 0.5秒
 
             // 获取设备状态信息
-            if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
             }
@@ -711,7 +851,7 @@ EXIT:
         printf("自动控制：正在关闭所有设备...\n");
 
         // 在退出阶段先获取从设备状态
-        if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+        if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
         {
             gettimeofday(&last_subsys_update, NULL);
         }
@@ -758,7 +898,7 @@ EXIT:
         auto_control_running = false;
 
         // 最后再更新一遍从设备状态
-        if (subsys_get_device_info(subsys_handle, &device_info) == 0)
+        if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
         {
             gettimeofday(&last_subsys_update, NULL);
         }
@@ -1155,20 +1295,31 @@ int parse_arguments(int argc, char *argv[])
         {
             tcp_enabled = 1;
             printf("TCP transmission enabled via command line\n");
-            printf("Automatically switching USB mode to RNDIS for TCP transmission...\n");
             
-            // 自动切换USB模式到RNDIS
-            if (set_usb_mode(USB_MODE_RNDIS) != 0)
+            // 检查当前USB模式是否已经是RNDIS
+            usb_mode_t current_mode = get_usb_mode();
+            if (current_mode == USB_MODE_RNDIS)
             {
-                printf("Warning: Failed to switch USB mode to RNDIS\n");
-                printf("TCP transmission may not work properly without RNDIS mode\n");
+                printf("USB mode is already RNDIS, no need to switch\n");
             }
             else
             {
-                printf("USB mode switched to RNDIS successfully\n");
-                // 等待USB模式切换完成
-                printf("Waiting for USB configuration to take effect...\n");
-                sleep(3); // 等待3秒让USB重新配置
+                printf("Current USB mode: %s\n", get_usb_mode_name(current_mode));
+                printf("Automatically switching USB mode to RNDIS for TCP transmission...\n");
+                
+                // 自动切换USB模式到RNDIS
+                if (set_usb_mode(USB_MODE_RNDIS) != 0)
+                {
+                    printf("Warning: Failed to switch USB mode to RNDIS\n");
+                    printf("TCP transmission may not work properly without RNDIS mode\n");
+                }
+                else
+                {
+                    printf("USB mode switched to RNDIS successfully\n");
+                    // 等待USB模式切换完成
+                    printf("Waiting for USB configuration to take effect...\n");
+                    sleep(3); // 等待3秒让USB重新配置
+                }
             }
         }
         else if (strcmp(argv[i], "--tcp-port") == 0)
@@ -1308,6 +1459,15 @@ int create_server(int port)
  */
 int send_frame(int fd, void *data, size_t size, uint32_t frame_id, uint64_t timestamp)
 {
+    // 首先发送帧同步标识
+    const char *frame_sync = "---MIXOSENSE---FRAME---";
+    size_t sync_len = strlen(frame_sync);
+    
+    if (send(fd, frame_sync, sync_len, MSG_NOSIGNAL) != (ssize_t)sync_len)
+    {
+        return -1;
+    }
+
     struct frame_header header = {
         .magic = 0xDEADBEEF,
         .frame_id = frame_id,
@@ -1381,7 +1541,26 @@ void *tcp_sender_thread(void *arg)
                 if (client_fd >= 0)
                 {
                     printf("TCP Client connected from %s\n", inet_ntoa(client_addr.sin_addr));
+                    
+                    // 设置更大的发送缓冲区以减少网络阻塞
+                    int send_buffer_size = 2 * 1024 * 1024; // 2MB 发送缓冲区
+                    if (setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)) < 0) {
+                        perror("Warning: Failed to set send buffer size");
+                    }
+                    
+                    // 设置TCP_NODELAY以减少延迟
+                    int flag = 1;
+                    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                        perror("Warning: Failed to set TCP_NODELAY");
+                    }
+                    
                     client_connected = 1;
+                    
+                    // TCP连接建立时自动关闭屏幕以减少系统负载
+                    if (screen_on) {
+                        printf("TCP connection established, turning off screen to optimize transmission\n");
+                        turn_screen_off();
+                    }
                 }
                 else
                 {
@@ -1425,6 +1604,10 @@ void *tcp_sender_thread(void *arg)
                 printf("TCP Client disconnected (frame %d)\n", tcp_frame_counter);
                 close(client_fd);
                 client_connected = 0;
+                
+                // TCP连接断开时恢复屏幕显示
+                printf("TCP connection lost, restoring screen display\n");
+                turn_screen_on();
             }
         }
 
@@ -1436,7 +1619,7 @@ void *tcp_sender_thread(void *arg)
             break;
         }
 
-        usleep(1000); // 1ms
+        usleep(1000); // 减少到100微秒以提高传输效率
     }
 
     // 清理TCP连接
@@ -1446,6 +1629,10 @@ void *tcp_sender_thread(void *arg)
         close(client_fd);
         client_connected = 0;
         client_fd = -1;
+        
+        // TCP线程结束时恢复屏幕显示
+        printf("TCP sender thread ending, restoring screen display\n");
+        turn_screen_on();
     }
 
     printf("TCP sender thread terminated\n");
@@ -1538,8 +1725,9 @@ void turn_screen_on(void)
  */
 void check_screen_timeout(void)
 {
-    if (!screen_on || display_enabled)
-        return; // 只在屏幕开启且显示关闭时检查超时
+    // 有TCP连接时不自动关闭屏幕，或者只在屏幕开启且显示关闭时检查超时
+    if (!screen_on || display_enabled || client_connected)
+        return;
 
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
@@ -1705,9 +1893,6 @@ float get_memory_usage(void)
  */
 void update_system_info(void)
 {
-    if (!info_label)
-        return;
-
     static struct timeval last_update = {0};
     struct timeval current_time;
     gettimeofday(&current_time, NULL);
@@ -1721,16 +1906,20 @@ void update_system_info(void)
         float cpu_usage = get_cpu_usage();
         float mem_usage = get_memory_usage();
 
-        char info_text[64];
-        // 格式：采集帧率 CPU占用率% 内存占用率%
-        // 例如：30.4cFPS 98% 70% (c表示capture采集帧率)
-        snprintf(info_text, sizeof(info_text),
-                 "%.1fcFPS  %.0f%%  %.0f%%",
-                 (double)current_fps,
-                 (double)(cpu_usage >= 0 ? cpu_usage : 0),
-                 (double)(mem_usage >= 0 ? mem_usage : 0));
+        // 只有在屏幕开启且info_label存在时才更新UI
+        if (info_label && screen_on) {
+            char info_text[64];
+            // 格式：采集帧率 CPU占用率% 内存占用率%
+            // 例如：30.4cFPS 98% 70% (c表示capture采集帧率)
+            snprintf(info_text, sizeof(info_text),
+                     "%.1fcFPS  %.0f%%  %.0f%%",
+                     (double)current_fps,
+                     (double)(cpu_usage >= 0 ? cpu_usage : 0),
+                     (double)(mem_usage >= 0 ? mem_usage : 0));
 
-        lv_label_set_text(info_label, info_text);
+            lv_label_set_text(info_label, info_text);
+        }
+        
         last_update = current_time;
     }
 }
@@ -2961,7 +3150,8 @@ int main(int argc, char *argv[])
         if (display_time_diff >= 25000)
         { // 优化为25ms以提高到40FPS潜力，实际受限于摄像头
             // 只在屏幕开启且显示启用时更新图像显示
-            if (screen_on && display_enabled)
+            // 当有TCP客户端连接时，暂停屏幕显示以减少系统负载
+            if (screen_on && display_enabled && !client_connected)
             {
                 update_image_display();
             }
@@ -2969,10 +3159,16 @@ int main(int argc, char *argv[])
         }
 
         // 更新子系统状态显示 - 降低频率到每200ms
+        // 当有TCP客户端连接时，暂停子系统查询以减少系统负载
         long status_time_diff = (current_time.tv_sec - last_status_update.tv_sec) * 1000000 +
                                 (current_time.tv_usec - last_status_update.tv_usec);
-        if (status_time_diff >= 200000)
-        { // 200ms，减少干扰
+        if (status_time_diff >= 200000 && !client_connected)
+        { // 200ms，减少干扰，且TCP连接时完全暂停
+            // 更新设备信息（包含温度过滤）
+            if (subsys_handle) {
+                get_device_info_with_filter(subsys_handle, &device_info);
+            }
+            
             update_subsys_status_display();
             
             // 检查屏幕自动关闭（摄像头暂停5秒后）
@@ -2982,12 +3178,15 @@ int main(int argc, char *argv[])
         }
 
         // 更新系统信息和时间显示 - 降低频率到每秒
+        // 当有TCP客户端连接时，暂停系统信息更新以减少系统负载
         long info_time_diff = (current_time.tv_sec - last_info_update.tv_sec) * 1000000 +
                               (current_time.tv_usec - last_info_update.tv_usec);
-        if (info_time_diff >= 1000000 && screen_on)
-        { // 1秒
+        if (info_time_diff >= 1000000 && !client_connected)
+        { // 1秒，且TCP连接时完全暂停
             update_system_info();
-            update_time_display();
+            if (screen_on) {
+                update_time_display();
+            }
             
             // 检查是否需要隐藏子系统状态
             hide_subsys_status_delayed();
@@ -2995,8 +3194,12 @@ int main(int argc, char *argv[])
             last_info_update = current_time;
         }
 
-        // 进一步优化休眠时间：减少到1ms以获得最高响应性
-        usleep(1000); // 1ms休眠，最大化循环频率
+        // 优化休眠时间：TCP连接时减少休眠以提高传输效率
+        if (client_connected) {
+            usleep(100); // TCP连接时仅100微秒休眠，最大化传输效率
+        } else {
+            usleep(1000); // 正常情况下1ms休眠
+        }
     }
 
     printf("Main loop exited, shutting down...\n");
