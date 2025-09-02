@@ -71,6 +71,10 @@
 static int camera_width = DEFAULT_CAMERA_WIDTH;
 static int camera_height = DEFAULT_CAMERA_HEIGHT;
 
+// 裁剪参数
+static int crop_top = 0;
+static int crop_left = 0;
+
 // 显示配置 according to "fbtft_lcd.h"
 #define DISPLAY_WIDTH FBTFT_LCD_DEFAULT_WIDTH
 #define DISPLAY_HEIGHT FBTFT_LCD_DEFAULT_HEIGHT
@@ -245,6 +249,8 @@ void signal_handler(int sig)
     current_config.gain = current_gain;
     current_config.camera_width = camera_width;
     current_config.camera_height = camera_height;
+    current_config.crop_top = crop_top;
+    current_config.crop_left = crop_left;
     current_config.exposure_step = exposure_step;
     current_config.gain_step = gain_step;
 
@@ -2951,6 +2957,24 @@ int main(int argc, char *argv[])
 
     printf("Camera session started successfully\n");
 
+    // ========================================================================
+    // 裁剪功能实现说明
+    // ========================================================================
+    // 由于Rockchip CSI驱动的特殊性，标准的V4L2 S_SELECTION不能直接使用
+    // 错误: "csi size err, intstat:0x1000200, size:0xc80500"
+    // 
+    // 替代方案：
+    // 1. 使用软件裁剪：在图像处理阶段进行裁剪
+    // 2. 调研Rockchip专用的裁剪API
+    // 3. 或者使用RGA（Rockchip Graphics Accelerator）进行硬件裁剪
+    //
+    // 当前状态：配置文件中的crop_top和crop_left会被加载但不应用
+    if (crop_top > 0 || crop_left > 0) {
+        printf("Note: Crop configuration loaded (top=%d, left=%d) but not applied\n", crop_top, crop_left);
+        printf("      Hardware crop is disabled due to Rockchip CSI driver limitations\n");
+        printf("      Consider implementing software crop or RGA-based crop in the future\n");
+    }
+
     // 初始化 LVGL 界面
     init_lvgl_ui();
 
@@ -4351,6 +4375,14 @@ int load_config_file(mxcamera_config_t *config)
             {
                 config->camera_height = atoi(value);
             }
+            else if (strcmp(key, "crop_top") == 0)
+            {
+                config->crop_top = atoi(value);
+            }
+            else if (strcmp(key, "crop_left") == 0)
+            {
+                config->crop_left = atoi(value);
+            }
             else if (strcmp(key, "exposure") == 0)
             {
                 config->exposure = atoi(value);
@@ -4402,6 +4434,8 @@ int save_config_file(const mxcamera_config_t *config)
     fprintf(file, "[camera]\n");
     fprintf(file, "camera_width = %d\n", config->camera_width);
     fprintf(file, "camera_height = %d\n", config->camera_height);
+    fprintf(file, "crop_top = %d\n", config->crop_top);
+    fprintf(file, "crop_left = %d\n", config->crop_left);
     fprintf(file, "\n");
     fprintf(file, "[controls]\n");
     fprintf(file, "exposure = %d\n", config->exposure);
@@ -4425,6 +4459,10 @@ void apply_config(const mxcamera_config_t *config)
     // 应用摄像头配置
     camera_width = config->camera_width;
     camera_height = config->camera_height;
+    
+    // 应用裁剪参数
+    crop_top = config->crop_top;
+    crop_left = config->crop_left;
 
     // 应用曝光和增益
     current_exposure = config->exposure;
@@ -4438,8 +4476,8 @@ void apply_config(const mxcamera_config_t *config)
         update_menu_selection();
     }
 
-    printf("Config applied: %dx%d, device: %s, exposure: %d, gain: %d\n",
-           camera_width, camera_height, DEFAULT_CAMERA_DEVICE, current_exposure, current_gain);
+    printf("Config applied: %dx%d, crop_top: %d, crop_left: %d, device: %s, exposure: %d, gain: %d\n",
+           camera_width, camera_height, crop_top, crop_left, DEFAULT_CAMERA_DEVICE, current_exposure, current_gain);
 }
 
 /**
@@ -4453,6 +4491,8 @@ void init_default_config(mxcamera_config_t *config)
     // 设置默认值
     config->camera_width = DEFAULT_CAMERA_WIDTH;
     config->camera_height = DEFAULT_CAMERA_HEIGHT;
+    config->crop_top = 0;        // 默认不裁剪
+    config->crop_left = 0;       // 默认不裁剪
     config->exposure = 128;
     config->gain = 128;
     config->exposure_step = 16;

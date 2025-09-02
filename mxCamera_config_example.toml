@@ -5,9 +5,11 @@
 [camera]
 camera_width = 1920
 camera_height = 1080
+crop_top = 0
+crop_left = 0
 
 [controls]
-exposure = 768
-gain = 512
+exposure = 640
+gain = 384
 exposure_step = 16
 gain_step = 32

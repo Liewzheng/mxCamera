@@ -66,6 +66,10 @@ typedef struct {
     int camera_width;
     int camera_height;
     
+    // 裁剪参数
+    int crop_top;
+    int crop_left;
+    
     // 控制参数
     int exposure;
     int gain;
