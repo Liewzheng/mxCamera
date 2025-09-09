@@ -1252,10 +1252,15 @@ void print_usage(const char *program_name)
     printf("  1280x720 (HD)\n");
     printf("  640x480 (VGA)\n");
     printf("\nControls:\n");
-    printf("  KEY0 - Toggle image display ON/OFF\n");
-    printf("  KEY1 - Enable/Disable TCP transmission\n");
-    printf("  KEY2 - Show/Hide settings menu\n");
-    printf("  KEY3 - Take photo (non-menu) / Confirm (menu)\n");
+    printf("  当菜单隐藏时:\n");
+    printf("  KEY_MENU (PIN %d)  - 显示设置菜单\n", KEY_MENU_PIN);
+    printf("  KEY_OK (PIN %d)    - 拍照\n", KEY_OK_PIN);
+    printf("  KEY_X (PIN %d)     - 短按: 切换自动控制 / 长按: 关机\n", KEY_X_PIN);
+    printf("\n  当菜单显示时:\n");
+    printf("  KEY_UP/RIGHT       - 菜单导航上/增加数值(调整模式)\n");
+    printf("  KEY_DOWN/LEFT      - 菜单导航下/减少数值(调整模式)\n");
+    printf("  KEY_OK             - 确认选择\n");
+    printf("  KEY_MENU           - 隐藏菜单\n");
     printf("  Ctrl+C - Exit\n");
 }
 
@@ -2336,23 +2341,33 @@ void *camera_thread(void *arg)
 // ============================================================================
 
 /**
- * @brief 处理按键输入 (新设计：KEY1=上，KEY0=下，KEY3=确认，KEY2=设置菜单)
+ * @brief 处理按键输入
+ * 菜单隐藏时：OK=拍照，MENU=显示菜单，X=自动控制切换
+ * 菜单显示时：OK=确认，UP/RIGHT=增加，DOWN/LEFT=减少，MENU=隐藏菜单
  */
 void handle_keys(void)
 {
-    static int last_key0_state = 1;
-    static int last_key1_state = 1;
-    static int last_key2_state = 1;
-    static int last_key3_state = 1;
-    static int last_keyx_state = 1;
-    static int key0_debounce_count = 0;
-    static int key1_debounce_count = 0;
-    static int key2_debounce_count = 0;
-    static int key3_debounce_count = 0;
-    static int keyx_debounce_count = 0;
+    // 静态变量保存按键状态和去抖动计数 (移除POWER按键相关)
+    static int last_key_up_state = 1;
+    static int last_key_down_state = 1;
+    static int last_key_left_state = 1;
+    static int last_key_right_state = 1;
+    static int last_key_menu_state = 1;
+    static int last_key_ok_state = 1;
+    static int last_key_x_state = 1;
+    
+    static int key_up_debounce_count = 0;
+    static int key_down_debounce_count = 0;
+    static int key_left_debounce_count = 0;
+    static int key_right_debounce_count = 0;
+    static int key_menu_debounce_count = 0;
+    static int key_ok_debounce_count = 0;
+    static int key_x_debounce_count = 0;
+    
     static struct timeval last_key_check = {0};
-    static struct timeval keyx_press_start = {0};
-    static bool keyx_long_press_triggered = false;
+    static struct timeval key_x_press_start = {0};
+    static bool key_x_long_press_triggered = false;
+    
     const int debounce_threshold = 3;
 
     // 限制按键检查频率
@@ -2367,16 +2382,20 @@ void handle_keys(void)
     }
     last_key_check = current_time;
 
-    // 读取按键状态
-    int current_key0 = GET_KEY0;
-    int current_key1 = GET_KEY1;
-    int current_key2 = GET_KEY2;
-    int current_key3 = GET_KEY3;
-    int current_keyx = GET_KEYX;
+    // 读取所有按键状态 (移除POWER按键)
+    int current_key_up = GET_KEY_UP;
+    int current_key_down = GET_KEY_DOWN;
+    int current_key_left = GET_KEY_LEFT;
+    int current_key_right = GET_KEY_RIGHT;
+    int current_key_menu = GET_KEY_MENU;
+    int current_key_ok = GET_KEY_OK;
+    int current_key_x = GET_KEY_X;
 
-    // 检查任意按键是否被按下（屏幕唤醒）
-    int any_key_pressed = (current_key0 == 0) || (current_key1 == 0) ||
-                          (current_key2 == 0) || (current_key3 == 0) || (current_keyx == 0);
+    // 检查任意按键是否被按下（屏幕唤醒，移除POWER按键）
+    int any_key_pressed = (current_key_up == 0) || (current_key_down == 0) ||
+                          (current_key_left == 0) || (current_key_right == 0) ||
+                          (current_key_menu == 0) || (current_key_ok == 0) ||
+                          (current_key_x == 0);
 
     if (any_key_pressed && !screen_on)
     {
@@ -2388,116 +2407,229 @@ void handle_keys(void)
     if (!screen_on)
         return;
 
-    // KEY1 去抖动处理 (上键 - 菜单导航)
-    if (current_key1 == last_key1_state)
+    // ========== KEY_UP (方向键上) 处理 ==========
+    if (current_key_up == last_key_up_state)
     {
-        key1_debounce_count = 0;
+        key_up_debounce_count = 0;
     }
     else
     {
-        key1_debounce_count++;
-        if (key1_debounce_count >= debounce_threshold)
+        key_up_debounce_count++;
+        if (key_up_debounce_count >= debounce_threshold)
         {
-            if (last_key1_state == 1 && current_key1 == 0)
+            if (last_key_up_state == 1 && current_key_up == 0)
             {
                 if (menu_visible)
                 {
-                    menu_navigate_up();
+                    if (in_adjustment_mode)
+                    {
+                        // 在调整模式下，UP增加数值
+                        if (adjustment_type == 0) // 曝光调整
+                        {
+                            adjust_exposure_up();
+                            printf("KEY_UP pressed - Increase exposure\n");
+                        }
+                        else if (adjustment_type == 1) // 增益调整
+                        {
+                            adjust_gain_up();
+                            printf("KEY_UP pressed - Increase gain\n");
+                        }
+                    }
+                    else
+                    {
+                        menu_navigate_up();
+                        printf("KEY_UP pressed - Menu navigate up\n");
+                    }
                 }
-                else
-                {
-                    // 非菜单模式下，KEY1 启动自动控制
-                    update_activity_time();
-                    printf("KEY1 pressed - 启动自动控制\n");
-                    start_auto_control_mode();
-                }
+                update_activity_time();
             }
-            last_key1_state = current_key1;
-            key1_debounce_count = 0;
+            last_key_up_state = current_key_up;
+            key_up_debounce_count = 0;
         }
     }
 
-    // KEY0 去抖动处理 (下键 - 菜单导航)
-    if (current_key0 == last_key0_state)
+    // ========== KEY_DOWN (方向键下) 处理 ==========
+    if (current_key_down == last_key_down_state)
     {
-        key0_debounce_count = 0;
+        key_down_debounce_count = 0;
     }
     else
     {
-        key0_debounce_count++;
-        if (key0_debounce_count >= debounce_threshold)
+        key_down_debounce_count++;
+        if (key_down_debounce_count >= debounce_threshold)
         {
-            if (last_key0_state == 1 && current_key0 == 0)
+            if (last_key_down_state == 1 && current_key_down == 0)
             {
                 if (menu_visible)
                 {
-                    menu_navigate_down();
+                    if (in_adjustment_mode)
+                    {
+                        // 在调整模式下，DOWN减少数值
+                        if (adjustment_type == 0) // 曝光调整
+                        {
+                            adjust_exposure_down();
+                            printf("KEY_DOWN pressed - Decrease exposure\n");
+                        }
+                        else if (adjustment_type == 1) // 增益调整
+                        {
+                            adjust_gain_down();
+                            printf("KEY_DOWN pressed - Decrease gain\n");
+                        }
+                    }
+                    else
+                    {
+                        menu_navigate_down();
+                        printf("KEY_DOWN pressed - Menu navigate down\n");
+                    }
                 }
-                else
-                {
-                    // 非菜单模式下，KEY0 停止自动控制
-                    update_activity_time();
-                    printf("KEY0 pressed - 停止自动控制\n");
-                    stop_auto_control_mode();
-                }
+                update_activity_time();
             }
-            last_key0_state = current_key0;
-            key0_debounce_count = 0;
+            last_key_down_state = current_key_down;
+            key_down_debounce_count = 0;
         }
     }
 
-    // KEY2 去抖动处理 (设置菜单开关)
-    if (current_key2 == last_key2_state)
+    // ========== KEY_LEFT (方向键左) 处理 ==========
+    if (current_key_left == last_key_left_state)
     {
-        key2_debounce_count = 0;
+        key_left_debounce_count = 0;
     }
     else
     {
-        key2_debounce_count++;
-        if (key2_debounce_count >= debounce_threshold)
+        key_left_debounce_count++;
+        if (key_left_debounce_count >= debounce_threshold)
         {
-            if (last_key2_state == 1 && current_key2 == 0)
+            if (last_key_left_state == 1 && current_key_left == 0)
             {
-                // KEY2 按下事件 - 切换设置菜单显示状态
                 if (menu_visible)
+                {
+                    if (in_adjustment_mode)
+                    {
+                        // 在调整模式下，LEFT减少数值
+                        if (adjustment_type == 0) // 曝光调整
+                        {
+                            adjust_exposure_down();
+                            printf("KEY_LEFT pressed - Decrease exposure\n");
+                        }
+                        else if (adjustment_type == 1) // 增益调整
+                        {
+                            adjust_gain_down();
+                            printf("KEY_LEFT pressed - Decrease gain\n");
+                        }
+                    }
+                    // else
+                    // {
+                    //     // 在菜单中，LEFT可以用作取消或退出
+                    //     hide_settings_menu();
+                    //     printf("KEY_LEFT pressed - Hide menu\n");
+                    // }
+                }
+                update_activity_time();
+            }
+            last_key_left_state = current_key_left;
+            key_left_debounce_count = 0;
+        }
+    }
+
+    // ========== KEY_RIGHT (方向键右) 处理 ==========
+    if (current_key_right == last_key_right_state)
+    {
+        key_right_debounce_count = 0;
+    }
+    else
+    {
+        key_right_debounce_count++;
+        if (key_right_debounce_count >= debounce_threshold)
+        {
+            if (last_key_right_state == 1 && current_key_right == 0)
+            {
+                if (menu_visible)
+                {
+                    if (in_adjustment_mode)
+                    {
+                        // 在调整模式下，RIGHT增加数值
+                        if (adjustment_type == 0) // 曝光调整
+                        {
+                            adjust_exposure_up();
+                            printf("KEY_RIGHT pressed - Increase exposure\n");
+                        }
+                        else if (adjustment_type == 1) // 增益调整
+                        {
+                            adjust_gain_up();
+                            printf("KEY_RIGHT pressed - Increase gain\n");
+                        }
+                    }
+                    else
+                    {
+                        // 在菜单中，RIGHT也可以作为确认（与OK相同）
+                        menu_confirm_selection();
+                        printf("KEY_RIGHT pressed - Menu confirm\n");
+                    }
+                }
+                update_activity_time();
+            }
+            last_key_right_state = current_key_right;
+            key_right_debounce_count = 0;
+        }
+    }
+
+    // ========== KEY_MENU (菜单键) 处理 ==========
+    if (current_key_menu == last_key_menu_state)
+    {
+        key_menu_debounce_count = 0;
+    }
+    else
+    {
+        key_menu_debounce_count++;
+        if (key_menu_debounce_count >= debounce_threshold)
+        {
+            if (last_key_menu_state == 1 && current_key_menu == 0)
+            {
+                if (in_adjustment_mode)
+                {
+                    // 退出调整模式
+                    in_adjustment_mode = 0;
+                    printf("KEY_MENU pressed - Exit adjustment mode\n");
+                }
+                else if (menu_visible)
                 {
                     hide_settings_menu();
+                    printf("KEY_MENU pressed - Hide settings menu\n");
                 }
                 else
                 {
                     show_settings_menu();
+                    printf("KEY_MENU pressed - Show settings menu\n");
                 }
                 update_activity_time();
-                printf("KEY2 pressed (Settings Menu %s)\n", menu_visible ? "shown" : "hidden");
             }
-            last_key2_state = current_key2;
-            key2_debounce_count = 0;
+            last_key_menu_state = current_key_menu;
+            key_menu_debounce_count = 0;
         }
     }
 
-    // KEY3 去抖动处理 (确认键)
-    if (current_key3 == last_key3_state)
+    // ========== KEY_OK (确认键) 处理 ==========
+    if (current_key_ok == last_key_ok_state)
     {
-        key3_debounce_count = 0;
+        key_ok_debounce_count = 0;
     }
     else
     {
-        key3_debounce_count++;
-        if (key3_debounce_count >= debounce_threshold)
+        key_ok_debounce_count++;
+        if (key_ok_debounce_count >= debounce_threshold)
         {
-            if (last_key3_state == 1 && current_key3 == 0)
+            if (last_key_ok_state == 1 && current_key_ok == 0)
             {
                 if (menu_visible)
                 {
                     menu_confirm_selection();
+                    printf("KEY_OK pressed - Menu confirm selection\n");
                 }
                 else
                 {
-                    // 非菜单模式下，KEY3 用于拍照
-                    turn_screen_on(); // 确保屏幕打开
-                    update_activity_time();
-
-                    printf("KEY3 pressed - Taking photo...\n");
+                    // 非菜单模式下，OK拍照
+                    turn_screen_on();
+                    printf("KEY_OK pressed - Taking photo...\n");
                     int result = capture_raw_photo();
                     if (result == 0)
                     {
@@ -2508,87 +2640,88 @@ void handle_keys(void)
                         printf("Photo capture failed\n");
                     }
                 }
+                update_activity_time();
             }
-            last_key3_state = current_key3;
-            key3_debounce_count = 0;
+            last_key_ok_state = current_key_ok;
+            key_ok_debounce_count = 0;
         }
     }
 
-    // KEYX 去抖动和长短按检测处理
-    if (current_keyx == last_keyx_state)
+    // ========== KEY_X 处理 ==========
+    if (current_key_x == last_key_x_state)
     {
-        keyx_debounce_count = 0;
+        key_x_debounce_count = 0;
     }
     else
     {
-        keyx_debounce_count++;
-        if (keyx_debounce_count >= debounce_threshold)
+        key_x_debounce_count++;
+        if (key_x_debounce_count >= debounce_threshold)
         {
-            last_keyx_state = current_keyx;
-            if (current_keyx == 0)
+            last_key_x_state = current_key_x;
+            if (current_key_x == 0)
             {
-                // KEYX 按键按下，记录按下时间
-                gettimeofday(&keyx_press_start, NULL);
-                keyx_long_press_triggered = false;
-                printf("KEYX pressed, starting timer...\n");
+                // KEY_X 按键按下，记录按下时间
+                gettimeofday(&key_x_press_start, NULL);
+                key_x_long_press_triggered = false;
+                printf("KEY_X pressed, starting timer...\n");
             }
             else
             {
-                // KEYX 按键释放，检查是短按还是长按
-                if (!keyx_long_press_triggered)
+                // KEY_X 按键释放，检查是短按还是长按
+                if (!key_x_long_press_triggered)
                 {
                     // 计算按键持续时间
-                    long press_duration = (current_time.tv_sec - keyx_press_start.tv_sec) * 1000000 +
-                                          (current_time.tv_usec - keyx_press_start.tv_usec);
+                    long press_duration = (current_time.tv_sec - key_x_press_start.tv_sec) * 1000000 +
+                                          (current_time.tv_usec - key_x_press_start.tv_usec);
 
                     // 验证是有效的短按（大于50ms，小于3秒）
                     if (press_duration >= 50000 && press_duration < 3000000)
                     {
-                        // 短按处理：切换自动控制模式（非阻塞方式）
-                        // 不使用trylock，因为start/stop函数内部会正确处理锁
+                        // 短按处理：切换自动控制模式
                         if (auto_control_running)
                         {
-                            printf("KEYX短按：停止自动控制\n");
+                            printf("KEY_X短按：停止自动控制\n");
                             stop_auto_control_mode();
                         }
                         else
                         {
-                            printf("KEYX短按：启动自动控制\n");
+                            printf("KEY_X短按：启动自动控制\n");
                             start_auto_control_mode();
                         }
                         update_activity_time();
                     }
                     else if (press_duration < 50000)
                     {
-                        printf("KEYX press too short (noise), ignored\n");
+                        printf("KEY_X press too short (noise), ignored\n");
                     }
                 }
-                printf("KEYX released\n");
+                printf("KEY_X released\n");
             }
-            keyx_debounce_count = 0;
+            key_x_debounce_count = 0;
         }
     }
 
-    // KEYX 长按检测 (在按键持续按下时检查)
-    if (current_keyx == 0 && last_keyx_state == 0 && !keyx_long_press_triggered)
+    // KEY_X 长按检测 (在按键持续按下时检查)
+    if (current_key_x == 0 && last_key_x_state == 0 && !key_x_long_press_triggered)
     {
-        // KEYX 持续按下，检查是否超过5秒 (增加时间，避免误触)
-        long press_duration = (current_time.tv_sec - keyx_press_start.tv_sec) * 1000000 +
-                              (current_time.tv_usec - keyx_press_start.tv_usec);
+        // KEY_X 持续按下，检查是否超过5秒
+        long press_duration = (current_time.tv_sec - key_x_press_start.tv_sec) * 1000000 +
+                              (current_time.tv_usec - key_x_press_start.tv_usec);
 
         // 在RNDIS模式下禁用关机功能，避免网络干扰导致的误触
         if (press_duration >= 5000000 && get_usb_mode() != USB_MODE_RNDIS)
-        { // 5秒 = 5,000,000 微秒，且非RNDIS模式
-            keyx_long_press_triggered = true;
-            printf("KEYX长按检测：执行关机...\n");
-            system("poweroff"); // 执行关机命令
+        {
+            key_x_long_press_triggered = true;
+            printf("KEY_X长按检测：执行关机...\n");
+            system("poweroff");
         }
         else if (press_duration >= 5000000 && get_usb_mode() == USB_MODE_RNDIS)
         {
-            keyx_long_press_triggered = true;
-            printf("KEYX长按检测：RNDIS模式下禁用关机功能\n");
+            key_x_long_press_triggered = true;
+            printf("KEY_X长按检测：RNDIS模式下禁用关机功能\n");
         }
     }
+
 }
 
 // ============================================================================
@@ -3123,19 +3256,24 @@ int main(int argc, char *argv[])
     printf("  - Dynamic buffer allocation for different resolutions\n");
     printf("  - Reduced debug output for better performance\n");
     printf("Controls:\n");
-    printf("  KEY0 (PIN %d) - Toggle image display ON/OFF (camera keeps running)\n", KEY0_PIN);
-    printf("  KEY1 (PIN %d) - Enable/Disable TCP transmission\n", KEY1_PIN);
-    printf("  KEY2 (PIN %d) - Show/Hide settings menu (TCP & DISPLAY controls)\n", KEY2_PIN);
-    printf("  KEY3 (PIN %d) - Take photo (non-menu) / Confirm selection (menu)\n", KEY3_PIN);
+    printf("  当菜单隐藏时:\n");
+    printf("  KEY_MENU (PIN %d)  - 显示设置菜单\n", KEY_MENU_PIN);
+    printf("  KEY_OK (PIN %d)    - 拍照\n", KEY_OK_PIN);
+    printf("  KEY_X (PIN %d)     - 短按: 切换自动控制 / 长按: 关机\n", KEY_X_PIN);
+    printf("\n  当菜单显示时:\n");
+    printf("  KEY_UP/RIGHT       - 菜单导航上/增加数值(调整模式)\n");
+    printf("  KEY_DOWN/LEFT      - 菜单导航下/减少数值(调整模式)\n");
+    printf("  KEY_OK             - 确认选择\n");
+    printf("  KEY_MENU           - 隐藏菜单\n");
     printf("  Ctrl+C - Exit\n");
     printf("Screen Management:\n");
     printf("  - Auto-sleep after 5s when display is OFF\n");
     printf("  - Wake with any key press\n");
     printf("Function Independence:\n");
     printf("  - Camera: Always running (captures frames continuously)\n");
-    printf("  - Display: Controlled by KEY0 (ON/OFF) or Settings Menu\n");
-    printf("  - TCP: Controlled by KEY1 (independent of display status) or Settings Menu\n");
-    printf("  - Settings Menu: Controlled by KEY2 (virtual menu with TCP & DISPLAY options)\n");
+    printf("  - Display: Controlled by KEY_LEFT (ON/OFF) or Settings Menu\n");
+    printf("  - TCP: Controlled by KEY_RIGHT (independent of display status) or Settings Menu\n");
+    printf("  - Settings Menu: Controlled by KEY_MENU (virtual menu with TCP & DISPLAY options)\n");
     printf("  - Time Display: Real-time clock in top-right corner (updates every minute)\n");
     printf("TCP Server: %s:%d (%s)\n", DEFAULT_SERVER_IP, DEFAULT_PORT, 
            tcp_enabled ? "enabled" : "disabled by default");

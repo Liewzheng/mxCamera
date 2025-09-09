@@ -98,6 +98,18 @@ static void DEV_GPIO_Init(void)
     printf("KEY_X_PIN (%d) initialized as input with pull-up\n", KEY_X_PIN);
 #endif
 
+#if defined KEY_MENU_PIN
+    DEV_GPIO_Mode(KEY_MENU_PIN, 1);
+    DEV_Digital_Write(KEY_MENU_PIN, 1); // 设置为高电平（上拉）
+    printf("KEY_MENU_PIN (%d) initialized as input with pull-up\n", KEY_MENU_PIN);
+#endif
+
+#if defined KEY_OK_PIN
+    DEV_GPIO_Mode(KEY_OK_PIN, 1);
+    DEV_Digital_Write(KEY_OK_PIN, 1); // 设置为高电平（上拉）
+    printf("KEY_OK_PIN (%d) initialized as input with pull-up\n", KEY_OK_PIN);
+#endif
+
 }
 
 UBYTE DEV_ModuleInit(void)
@@ -128,6 +140,14 @@ void DEV_ModuleExit(void)
 
 #if defined KEY_X_PIN
     libgpio_unexport(KEY_X_PIN);
+#endif
+
+#if defined KEY_MENU_PIN
+    libgpio_unexport(KEY_MENU_PIN);
+#endif
+
+#if defined KEY_OK_PIN
+    libgpio_unexport(KEY_OK_PIN);
 #endif
 
     // 清理 libgpio 库

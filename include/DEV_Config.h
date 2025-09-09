@@ -45,6 +45,9 @@
 #define KEY1_PIN	 (131)	// GPIO4_A3_D
 #define KEY2_PIN	 (130)	// GPIO4_A2_D
 #define KEY3_PIN	 (134)	// GPIO4_A6_D
+#define KEY4_PIN	 (136)	// GPIO4_A6_D
+#define KEY5_PIN	 (137)	// GPIO4_A6_D
+
 #define KEYX_PIN	 (55)	// GPIO1_C7_D
 #define POWER_PIN    (54)	// GPIO1_C6_D
 
@@ -53,6 +56,9 @@
 #define KEY_DOWN_PIN    KEY1_PIN    // 方向键：下  
 #define KEY_LEFT_PIN    KEY2_PIN    // 方向键：左
 #define KEY_RIGHT_PIN   KEY3_PIN    // 方向键：右
+#define KEY_MENU_PIN    KEY4_PIN    // 菜单键
+#define KEY_OK_PIN      KEY5_PIN    // 确认键
+
 #define KEY_X_PIN       KEYX_PIN    
 #define KEY_POWER_PIN   POWER_PIN // 电源键
 
@@ -66,7 +72,18 @@
 #define GET_KEY1                DEV_Digital_Read(KEY1_PIN)
 #define GET_KEY2                DEV_Digital_Read(KEY2_PIN)
 #define GET_KEY3                DEV_Digital_Read(KEY3_PIN)
+#define GET_KEY4                DEV_Digital_Read(KEY4_PIN)
+#define GET_KEY5                DEV_Digital_Read(KEY5_PIN)
 #define GET_KEYX                DEV_Digital_Read(KEYX_PIN)
+
+// 按键功能映射读取宏
+#define GET_KEY_UP              DEV_Digital_Read(KEY_UP_PIN)
+#define GET_KEY_DOWN            DEV_Digital_Read(KEY_DOWN_PIN)
+#define GET_KEY_LEFT            DEV_Digital_Read(KEY_LEFT_PIN)
+#define GET_KEY_RIGHT           DEV_Digital_Read(KEY_RIGHT_PIN)
+#define GET_KEY_MENU            DEV_Digital_Read(KEY_MENU_PIN)
+#define GET_KEY_OK              DEV_Digital_Read(KEY_OK_PIN)
+#define GET_KEY_X               DEV_Digital_Read(KEY_X_PIN)
 
 /*------------------------------------------------------------------------------------------------------*/
 UBYTE DEV_ModuleInit(void);
