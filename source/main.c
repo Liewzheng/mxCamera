@@ -65,7 +65,7 @@
 #define DEFAULT_CAMERA_HEIGHT 1080
 #define CAMERA_PIXELFORMAT V4L2_PIX_FMT_SBGGR10
 #define DEFAULT_CAMERA_DEVICE "/dev/video0"
-#define BUFFER_COUNT 4 // 增加缓冲区数量以减少帧丢失，提高帧率稳定性
+#define BUFFER_COUNT 2 // 增加缓冲区数量以减少帧丢失，提高帧率稳定性
 
 // 全局摄像头配置变量 (可通过命令行修改)
 static int camera_width = DEFAULT_CAMERA_WIDTH;
@@ -4370,7 +4370,50 @@ int capture_raw_photo(void)
 
     // 捕获一帧
     media_frame_t frame;
-    int result = libmedia_session_capture_frame(media_session, &frame, 5000); // 5秒超时
+    int result = -1;
+    bool is_frame_copy = false; // 标记是否为副本
+    
+    // 当TCP启用时，使用当前帧数据而不是重新捕获，避免与camera线程竞争
+    if (tcp_enabled)
+    {
+        printf("TCP enabled - using current frame data to avoid resource conflict...\n");
+        
+        // 获取当前帧的副本，避免在TCP传输过程中被修改
+        pthread_mutex_lock(&frame_mutex);
+        if (current_frame.data && frame_available)
+        {
+            // 创建当前帧的副本
+            frame.data = malloc(current_frame.size);
+            if (frame.data)
+            {
+                memcpy(frame.data, current_frame.data, current_frame.size);
+                frame.size = current_frame.size;
+                frame.width = current_frame.width;
+                frame.height = current_frame.height;
+                frame.pixelformat = current_frame.pixelformat;
+                result = 0;
+                is_frame_copy = true; // 标记为副本
+                printf("Using current frame: %zu bytes (%dx%d)\n", 
+                       frame.size, frame.width, frame.height);
+            }
+            else
+            {
+                printf("Error: Failed to allocate memory for frame copy\n");
+                result = -1;
+            }
+        }
+        else
+        {
+            printf("Error: No current frame available\n");
+            result = -1;
+        }
+        pthread_mutex_unlock(&frame_mutex);
+    }
+    else
+    {
+        // TCP未启用时，直接捕获新帧
+        result = libmedia_session_capture_frame(media_session, &frame, 5000); // 5秒超时
+    }
 
     if (result != 0)
     {
@@ -4397,7 +4440,14 @@ int capture_raw_photo(void)
     if (!unpacked_pixels)
     {
         printf("Error: Failed to allocate memory for unpacked pixels\n");
-        libmedia_session_release_frame(media_session, &frame);
+        if (is_frame_copy)
+        {
+            free(frame.data); // 释放副本内存
+        }
+        else
+        {
+            libmedia_session_release_frame(media_session, &frame);
+        }
         return -1;
     }
 
@@ -4410,7 +4460,14 @@ int capture_raw_photo(void)
     {
         printf("Error: Failed to unpack RAW10 data\n");
         free(unpacked_pixels);
-        libmedia_session_release_frame(media_session, &frame);
+        if (is_frame_copy)
+        {
+            free(frame.data); // 释放副本内存
+        }
+        else
+        {
+            libmedia_session_release_frame(media_session, &frame);
+        }
         return -1;
     }
 
@@ -4422,7 +4479,14 @@ int capture_raw_photo(void)
     {
         printf("Error: Failed to create file %s: %s\n", filename, strerror(errno));
         free(unpacked_pixels);
-        libmedia_session_release_frame(media_session, &frame);
+        if (is_frame_copy)
+        {
+            free(frame.data); // 释放副本内存
+        }
+        else
+        {
+            libmedia_session_release_frame(media_session, &frame);
+        }
         return -1;
     }
 
@@ -4433,7 +4497,14 @@ int capture_raw_photo(void)
 
     // 释放缓冲区和帧
     free(unpacked_pixels);
-    libmedia_session_release_frame(media_session, &frame);
+    if (is_frame_copy)
+    {
+        free(frame.data); // 释放副本内存
+    }
+    else
+    {
+        libmedia_session_release_frame(media_session, &frame);
+    }
 
     if (written != data_size)
     {
