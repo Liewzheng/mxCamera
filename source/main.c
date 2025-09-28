@@ -198,6 +198,7 @@ static lv_obj_t *menu_heater1_btn = NULL;     // HEATER1 模式按钮
 static lv_obj_t *menu_heater2_btn = NULL;     // HEATER2 模式按钮
 static lv_obj_t *menu_pump_btn = NULL;        // PUMP 模式按钮
 static lv_obj_t *menu_laser_btn = NULL;       // LASER 模式按钮
+static lv_obj_t *menu_list_container = NULL;  // 菜单滚动容器
 // static lv_obj_t* menu_close_btn = NULL;  // 关闭按钮
 static lv_obj_t *subsys_status_label = NULL;  // 子系统状态标签 (新增)
 
@@ -3079,15 +3080,22 @@ void init_lvgl_ui(void)
     // status_label = lv_label_create(scr);
     // tcp_label = lv_label_create(scr);
 
-    // 创建设置菜单面板 (初始隐藏) - 重新设计为导航式菜单
+    // 创建设置菜单面板 (初始隐藏) - 重新设计为固定尺寸带滚动的导航菜单
     menu_panel = lv_obj_create(scr);
-    lv_obj_set_size(menu_panel, 220, 260);
+    lv_obj_set_size(menu_panel, 200, 200);
     lv_obj_center(menu_panel);
     lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
     lv_obj_set_style_border_color(menu_panel, lv_color_white(), 0);
     lv_obj_set_style_border_width(menu_panel, 2, 0);
     lv_obj_set_style_radius(menu_panel, 10, 0);
+    lv_obj_set_style_pad_all(menu_panel, 12, 0);
+    lv_obj_clear_flag(menu_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(menu_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(menu_panel,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
     lv_obj_add_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
 
     // 菜单标题
@@ -3095,97 +3103,111 @@ void init_lvgl_ui(void)
     lv_label_set_text(menu_title, "Settings Menu");
     lv_obj_set_style_text_color(menu_title, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_title, &lv_font_montserrat_14, 0);
-    lv_obj_align(menu_title, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_width(menu_title, lv_pct(100));
+    lv_obj_set_style_text_align(menu_title, LV_TEXT_ALIGN_CENTER, 0);
+
+    // 创建滚动容器承载菜单条目
+    menu_list_container = lv_obj_create(menu_panel);
+    lv_obj_set_width(menu_list_container, lv_pct(100));
+    lv_obj_set_flex_grow(menu_list_container, 1);
+    lv_obj_set_style_bg_opa(menu_list_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_opa(menu_list_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(menu_list_container, 0, 0);
+    lv_obj_set_style_pad_top(menu_list_container, 6, 0);
+    lv_obj_set_style_pad_gap(menu_list_container, 6, 0);
+    lv_obj_set_scroll_dir(menu_list_container, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(menu_list_container, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(menu_list_container, LV_FLEX_FLOW_COLUMN);
 
     // TCP 选项标签 (不是按钮，用标签显示)
-    menu_tcp_btn = lv_label_create(menu_panel);
+    menu_tcp_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_tcp_btn, "> TCP: OFF");
+    lv_obj_set_width(menu_tcp_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_tcp_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_tcp_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(60, 60, 60), 0);
     lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_50, 0);
     lv_obj_set_style_pad_all(menu_tcp_btn, 4, 0);
-    lv_obj_align(menu_tcp_btn, LV_ALIGN_TOP_MID, 0, 35);
 
     // DISPLAY 选项标签
-    menu_display_btn = lv_label_create(menu_panel);
+    menu_display_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_display_btn, "  DISPLAY: ON");
+    lv_obj_set_width(menu_display_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_display_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_display_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_display_btn, 4, 0);
-    lv_obj_align(menu_display_btn, LV_ALIGN_TOP_MID, 0, 60);
 
     // EXPOSURE 选项标签
-    menu_exposure_btn = lv_label_create(menu_panel);
+    menu_exposure_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_exposure_btn, "  EXPOSURE: 128");
+    lv_obj_set_width(menu_exposure_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_exposure_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_exposure_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_exposure_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_exposure_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_exposure_btn, 4, 0);
-    lv_obj_align(menu_exposure_btn, LV_ALIGN_TOP_MID, 0, 85);
 
     // GAIN 选项标签
-    menu_gain_btn = lv_label_create(menu_panel);
+    menu_gain_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_gain_btn, "  GAIN: 128");
+    lv_obj_set_width(menu_gain_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_gain_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_gain_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_gain_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_gain_btn, 4, 0);
-    lv_obj_align(menu_gain_btn, LV_ALIGN_TOP_MID, 0, 110);
 
     // USB CONFIG 选项标签
-    menu_usb_config_btn = lv_label_create(menu_panel);
+    menu_usb_config_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_usb_config_btn, "  USB: ADB");
+    lv_obj_set_width(menu_usb_config_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_usb_config_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_usb_config_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_usb_config_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_usb_config_btn, 4, 0);
-    lv_obj_align(menu_usb_config_btn, LV_ALIGN_TOP_MID, 0, 135);
 
     // HEATER1 选项标签
-    menu_heater1_btn = lv_label_create(menu_panel);
+    menu_heater1_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_heater1_btn, "  HEATER1: AUTO");
+    lv_obj_set_width(menu_heater1_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_heater1_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_heater1_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_heater1_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_heater1_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_heater1_btn, 4, 0);
-    lv_obj_align(menu_heater1_btn, LV_ALIGN_TOP_MID, 0, 160);
 
     // HEATER2 选项标签
-    menu_heater2_btn = lv_label_create(menu_panel);
+    menu_heater2_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_heater2_btn, "  HEATER2: AUTO");
+    lv_obj_set_width(menu_heater2_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_heater2_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_heater2_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_heater2_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_heater2_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_heater2_btn, 4, 0);
-    lv_obj_align(menu_heater2_btn, LV_ALIGN_TOP_MID, 0, 185);
 
     // PUMP 选项标签
-    menu_pump_btn = lv_label_create(menu_panel);
+    menu_pump_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_pump_btn, "  PUMP: AUTO");
+    lv_obj_set_width(menu_pump_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_pump_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_pump_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_pump_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_pump_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_pump_btn, 4, 0);
-    lv_obj_align(menu_pump_btn, LV_ALIGN_TOP_MID, 0, 210);
 
     // LASER 选项标签
-    menu_laser_btn = lv_label_create(menu_panel);
+    menu_laser_btn = lv_label_create(menu_list_container);
     lv_label_set_text(menu_laser_btn, "  LASER: AUTO");
+    lv_obj_set_width(menu_laser_btn, lv_pct(100));
     lv_obj_set_style_text_color(menu_laser_btn, lv_color_white(), 0);
     lv_obj_set_style_text_font(menu_laser_btn, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(menu_laser_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_laser_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_laser_btn, 4, 0);
-    lv_obj_align(menu_laser_btn, LV_ALIGN_TOP_MID, 0, 235);
 
     // 创建子系统状态面板 (屏幕底部)
     subsys_panel = lv_obj_create(scr);
@@ -3997,6 +4019,11 @@ void show_settings_menu(void)
     menu_selected_item = 0; // 默认选择第一项 (TCP)
     lv_obj_clear_flag(menu_panel, LV_OBJ_FLAG_HIDDEN);
 
+    if (menu_list_container)
+    {
+        lv_obj_scroll_to_y(menu_list_container, 0, LV_ANIM_OFF);
+    }
+
     // 更新菜单内容并刷新选择状态
     update_menu_selection();
 
@@ -4020,9 +4047,36 @@ void hide_settings_menu(void)
 /**
  * @brief 更新菜单选择状态的视觉显示
  */
+static lv_obj_t *menu_item_object(int item)
+{
+    switch (item)
+    {
+    case MENU_ITEM_TCP:
+        return menu_tcp_btn;
+    case MENU_ITEM_DISPLAY:
+        return menu_display_btn;
+    case MENU_ITEM_EXPOSURE:
+        return menu_exposure_btn;
+    case MENU_ITEM_GAIN:
+        return menu_gain_btn;
+    case MENU_ITEM_USB:
+        return menu_usb_config_btn;
+    case MENU_ITEM_HEATER1:
+        return menu_heater1_btn;
+    case MENU_ITEM_HEATER2:
+        return menu_heater2_btn;
+    case MENU_ITEM_PUMP:
+        return menu_pump_btn;
+    case MENU_ITEM_LASER:
+        return menu_laser_btn;
+    default:
+        return NULL;
+    }
+}
+
 void update_menu_selection(void)
 {
-    if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn || !menu_usb_config_btn ||
+    if (!menu_visible || !menu_list_container || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn || !menu_usb_config_btn ||
         !menu_heater1_btn || !menu_heater2_btn || !menu_pump_btn || !menu_laser_btn)
         return;
 
@@ -4164,6 +4218,12 @@ void update_menu_selection(void)
         snprintf(laser_text, sizeof(laser_text), "> LASER: %s", device_mode_to_string(device_modes[DEVICE_CTRL_LASER]));
         lv_label_set_text(menu_laser_btn, laser_text);
         break;
+    }
+
+    lv_obj_t *focused_obj = menu_item_object(menu_selected_item);
+    if (focused_obj)
+    {
+        lv_obj_scroll_to_view(focused_obj, LV_ANIM_OFF);
     }
 }
 
