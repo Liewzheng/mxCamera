@@ -120,7 +120,21 @@ static volatile int display_enabled = 1; // 图像显示开关状态 (KEY0控制
 static volatile int tcp_enabled = 0;
 static volatile int screen_on = 1;          // 屏幕开关状态
 static volatile int menu_visible = 0;       // 设置菜单显示状态
-static volatile int menu_selected_item = 0; // 菜单选中项 (0=TCP, 1=DISPLAY, 2=EXPOSURE, 3=GAIN, 4=USB_CONFIG)
+static volatile int menu_selected_item = 0; // 菜单选中项 (参见 MENU_ITEM_* 常量)
+
+enum
+{
+    MENU_ITEM_TCP = 0,
+    MENU_ITEM_DISPLAY,
+    MENU_ITEM_EXPOSURE,
+    MENU_ITEM_GAIN,
+    MENU_ITEM_USB,
+    MENU_ITEM_HEATER1,
+    MENU_ITEM_HEATER2,
+    MENU_ITEM_PUMP,
+    MENU_ITEM_LASER,
+    MENU_ITEM_COUNT
+};
 static volatile int in_adjustment_mode = 0; // 是否在调整模式中
 static volatile int adjustment_type = 0;    // 调整类型 (0=exposure, 1=gain)
 static struct timeval last_activity_time;   // 最后活动时间
@@ -180,6 +194,10 @@ static lv_obj_t *menu_display_btn = NULL;     // DISPLAY 按钮
 static lv_obj_t *menu_exposure_btn = NULL;    // EXPOSURE 按钮
 static lv_obj_t *menu_gain_btn = NULL;        // GAIN 按钮
 static lv_obj_t *menu_usb_config_btn = NULL;  // USB CONFIG 按钮
+static lv_obj_t *menu_heater1_btn = NULL;     // HEATER1 模式按钮
+static lv_obj_t *menu_heater2_btn = NULL;     // HEATER2 模式按钮
+static lv_obj_t *menu_pump_btn = NULL;        // PUMP 模式按钮
+static lv_obj_t *menu_laser_btn = NULL;       // LASER 模式按钮
 // static lv_obj_t* menu_close_btn = NULL;  // 关闭按钮
 static lv_obj_t *subsys_status_label = NULL;  // 子系统状态标签 (新增)
 
@@ -214,6 +232,30 @@ typedef struct {
 
 static temp_filter_t temp1_filter = {0};   // 温度1滤波器
 static temp_filter_t temp2_filter = {0};   // 温度2滤波器
+
+typedef enum
+{
+    DEVICE_MODE_AUTO = 0,
+    DEVICE_MODE_ON,
+    DEVICE_MODE_OFF,
+    DEVICE_MODE_COUNT
+} device_mode_t;
+
+typedef enum
+{
+    DEVICE_CTRL_HEATER1 = 0,
+    DEVICE_CTRL_HEATER2,
+    DEVICE_CTRL_PUMP,
+    DEVICE_CTRL_LASER,
+    DEVICE_CTRL_COUNT
+} device_control_t;
+
+static volatile device_mode_t device_modes[DEVICE_CTRL_COUNT] = {
+    DEVICE_MODE_AUTO,
+    DEVICE_MODE_AUTO,
+    DEVICE_MODE_AUTO,
+    DEVICE_MODE_AUTO
+};
 
 // 配置管理
 static mxcamera_config_t current_config; // 当前配置
@@ -423,6 +465,166 @@ int get_device_info_with_filter(subsys_handle_t handle, subsys_device_info_t *in
     return result;
 }
 
+// ============================================================================
+// 设备模式控制工具函数
+// ============================================================================
+
+static const char *device_mode_to_string(device_mode_t mode)
+{
+    switch (mode)
+    {
+    case DEVICE_MODE_ON:
+        return "ON";
+    case DEVICE_MODE_OFF:
+        return "OFF";
+    case DEVICE_MODE_AUTO:
+    default:
+        return "AUTO";
+    }
+}
+
+static const char *device_control_name(device_control_t device)
+{
+    switch (device)
+    {
+    case DEVICE_CTRL_HEATER1:
+        return "Heater1";
+    case DEVICE_CTRL_HEATER2:
+        return "Heater2";
+    case DEVICE_CTRL_PUMP:
+        return "Pump";
+    case DEVICE_CTRL_LASER:
+        return "Laser";
+    default:
+        return "Unknown";
+    }
+}
+
+static subsys_device_t device_control_to_subsys(device_control_t device)
+{
+    switch (device)
+    {
+    case DEVICE_CTRL_HEATER1:
+        return SUBSYS_DEVICE_HEATER1;
+    case DEVICE_CTRL_HEATER2:
+        return SUBSYS_DEVICE_HEATER2;
+    case DEVICE_CTRL_PUMP:
+        return SUBSYS_DEVICE_PUMP;
+    case DEVICE_CTRL_LASER:
+        return SUBSYS_DEVICE_LASER;
+    default:
+        return SUBSYS_DEVICE_PUMP;
+    }
+}
+
+static subsys_device_status_t *device_status_field(device_control_t device)
+{
+    switch (device)
+    {
+    case DEVICE_CTRL_HEATER1:
+        return &device_info.heater1_status;
+    case DEVICE_CTRL_HEATER2:
+        return &device_info.heater2_status;
+    case DEVICE_CTRL_PUMP:
+        return &device_info.pump_status;
+    case DEVICE_CTRL_LASER:
+        return &device_info.laser_status;
+    default:
+        return NULL;
+    }
+}
+
+static void apply_device_mode(device_control_t device)
+{
+    if (!subsys_handle)
+    {
+        return;
+    }
+
+    device_mode_t mode = device_modes[device];
+    if (mode == DEVICE_MODE_AUTO)
+    {
+        return;
+    }
+
+    bool turn_on = (mode == DEVICE_MODE_ON);
+    subsys_device_t subsys_device = device_control_to_subsys(device);
+    subsys_device_status_t *status = device_status_field(device);
+
+    if (status)
+    {
+        if (turn_on && *status == SUBSYS_STATUS_ON)
+        {
+            return;
+        }
+        if (!turn_on && *status == SUBSYS_STATUS_OFF)
+        {
+            return;
+        }
+    }
+
+    int result = subsys_control_device(subsys_handle, subsys_device, turn_on);
+    if (result != 0)
+    {
+        const char *error_info = subsys_get_last_error(subsys_handle);
+        printf("Warning: Failed to set %s to %s (%s)\n",
+               device_control_name(device),
+               device_mode_to_string(mode),
+               error_info ? error_info : "unknown error");
+    }
+    else
+    {
+        printf("Manual override applied: %s -> %s\n",
+               device_control_name(device),
+               device_mode_to_string(mode));
+    }
+}
+
+static void set_device_mode(device_control_t device, device_mode_t mode)
+{
+    device_mode_t previous = device_modes[device];
+    if (previous == mode)
+    {
+        if (mode != DEVICE_MODE_AUTO)
+        {
+            apply_device_mode(device);
+        }
+        return;
+    }
+
+    device_modes[device] = mode;
+    printf("Device mode updated: %s -> %s\n",
+           device_control_name(device),
+           device_mode_to_string(mode));
+
+    if (mode != DEVICE_MODE_AUTO)
+    {
+        apply_device_mode(device);
+    }
+}
+
+static void cycle_device_mode(device_control_t device)
+{
+    device_mode_t next_mode = (device_mode_t)((device_modes[device] + 1) % DEVICE_MODE_COUNT);
+    set_device_mode(device, next_mode);
+}
+
+static void enforce_manual_device_modes(void)
+{
+    if (!subsys_handle)
+    {
+        return;
+    }
+
+    for (int i = 0; i < DEVICE_CTRL_COUNT; ++i)
+    {
+        if (device_modes[i] != DEVICE_MODE_AUTO)
+        {
+            apply_device_mode((device_control_t)i);
+        }
+    }
+}
+
 /**
  * @brief 初始化子系统通信
  * @return 0=成功，-1=失败
@@ -591,137 +793,172 @@ void *auto_control_thread(void *arg)
         return NULL;
     }
 
+    enforce_manual_device_modes();
+
     // 启动加热片1
     if (subsys_handle)
     {
-        result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, true);
-        if (result == 0)
+        if (device_modes[DEVICE_CTRL_HEATER1] == DEVICE_MODE_AUTO)
         {
-            printf("自动控制：加热片1已启动（持续运行）\n");
-        }
-        else
-        {
-            // 获取详细错误信息
-            const char* error_info = subsys_get_last_error(subsys_handle);
-            printf("错误: 加热片1启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
-            
-            // 检查是否是"已在运行"错误，如果是则检查设备状态
-            if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, true);
+            if (result == 0)
             {
-                // 更新设备状态并检查加热片1是否确实在运行
-                if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
+                printf("自动控制：加热片1已启动（持续运行）\n");
+            }
+            else
+            {
+                const char *error_info = subsys_get_last_error(subsys_handle);
+                printf("错误: 加热片1启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+
+                if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
                 {
-                    if (device_info.heater1_status == SUBSYS_STATUS_ON)
+                    if (get_device_info_with_filter(subsys_handle, &device_info) == 0 &&
+                        device_info.heater1_status == SUBSYS_STATUS_ON)
                     {
                         printf("自动控制：加热片1已在运行中，继续执行\n");
                         gettimeofday(&last_subsys_update, NULL);
                         goto HEATER1_RUNNING; // 跳转到加热片1运行逻辑
                     }
                 }
-            }
-            
-            error_exit = true;
-            goto EXIT;
-        }
 
-HEATER1_RUNNING:
-        for(int i = 0; i< 30; i++)
-        {
-            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
-            {
-                gettimeofday(&last_subsys_update, NULL);
-            }
-
-            // 如果收到停止信号，则提前退出
-            if (!auto_control_thread_running && exit_flag)
-            {
-                usleep(200000); // 0.2秒
+                error_exit = true;
                 goto EXIT;
             }
-            else
-            {
-                sleep(1);
-            }
 
-            if ((double)(device_info.temp1) > 30.0 && device_info.heater1_status == SUBSYS_STATUS_ON)
+HEATER1_RUNNING:
+            for (int i = 0; i < 30; i++)
             {
-                printf("警告: 加热片1温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp1));
-                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
-                break;
+                if (device_modes[DEVICE_CTRL_HEATER1] != DEVICE_MODE_AUTO)
+                {
+                    apply_device_mode(DEVICE_CTRL_HEATER1);
+                    break;
+                }
+
+                if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
+                {
+                    gettimeofday(&last_subsys_update, NULL);
+                }
+
+                if (!auto_control_thread_running && exit_flag)
+                {
+                    usleep(200000); // 0.2秒
+                    goto EXIT;
+                }
+                else
+                {
+                    sleep(1);
+                }
+
+                if (device_modes[DEVICE_CTRL_HEATER1] != DEVICE_MODE_AUTO)
+                {
+                    apply_device_mode(DEVICE_CTRL_HEATER1);
+                    break;
+                }
+
+                if ((double)(device_info.temp1) > 30.0 && device_info.heater1_status == SUBSYS_STATUS_ON)
+                {
+                    printf("警告: 加热片1温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp1));
+                    subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+                    break;
+                }
             }
+        }
+        else
+        {
+            apply_device_mode(DEVICE_CTRL_HEATER1);
         }
     }
 
     // 启动加热片2
     if (subsys_handle)
     {
-        result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, true);
-        if (result == 0)
+        if (device_modes[DEVICE_CTRL_HEATER2] == DEVICE_MODE_AUTO)
         {
-            printf("自动控制：加热片2已启动（持续运行）\n");
-        }
-        else
-        {
-            // 获取详细错误信息
-            const char* error_info = subsys_get_last_error(subsys_handle);
-            printf("错误: 加热片2启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
-            
-            // 检查是否是"已在运行"错误，如果是则检查设备状态
-            if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, true);
+            if (result == 0)
             {
-                // 更新设备状态并检查加热片2是否确实在运行
-                if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
+                printf("自动控制：加热片2已启动（持续运行）\n");
+            }
+            else
+            {
+                const char *error_info = subsys_get_last_error(subsys_handle);
+                printf("错误: 加热片2启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+
+                if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
                 {
-                    if (device_info.heater2_status == SUBSYS_STATUS_ON)
+                    if (get_device_info_with_filter(subsys_handle, &device_info) == 0 &&
+                        device_info.heater2_status == SUBSYS_STATUS_ON)
                     {
                         printf("自动控制：加热片2已在运行中，继续执行\n");
                         gettimeofday(&last_subsys_update, NULL);
                         goto HEATER2_RUNNING; // 跳转到加热片2运行逻辑
                     }
                 }
-            }
-            
-            error_exit = true;
-            goto EXIT;
-        }
 
-HEATER2_RUNNING:
-        printf("等待50秒，以加热 HEATER2 至60摄氏度");
-        for(int i = 0; i< 50; i++)
-        {
-            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
-            {
-                gettimeofday(&last_subsys_update, NULL);
-            }
-
-            if (!auto_control_thread_running && exit_flag)
-            {
-                usleep(200000); // 0.2秒
+                error_exit = true;
                 goto EXIT;
             }
-            else
-            {
-                sleep(1);
-            }
 
-            if ((double)(device_info.temp2) > 60.0 && device_info.heater2_status == SUBSYS_STATUS_ON)
+HEATER2_RUNNING:
+            printf("等待50秒，以加热 HEATER2 至60摄氏度");
+            for (int i = 0; i < 50; i++)
             {
-                printf("警告: 加热片2温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp2));
-                subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
-                break;
+                if (device_modes[DEVICE_CTRL_HEATER2] != DEVICE_MODE_AUTO)
+                {
+                    apply_device_mode(DEVICE_CTRL_HEATER2);
+                    break;
+                }
+
+                if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
+                {
+                    gettimeofday(&last_subsys_update, NULL);
+                }
+
+                if (!auto_control_thread_running && exit_flag)
+                {
+                    usleep(200000); // 0.2秒
+                    goto EXIT;
+                }
+                else
+                {
+                    sleep(1);
+                }
+
+                if (device_modes[DEVICE_CTRL_HEATER2] != DEVICE_MODE_AUTO)
+                {
+                    apply_device_mode(DEVICE_CTRL_HEATER2);
+                    break;
+                }
+
+                if ((double)(device_info.temp2) > 60.0 && device_info.heater2_status == SUBSYS_STATUS_ON)
+                {
+                    printf("警告: 加热片2温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp2));
+                    subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+                    break;
+                }
             }
+        }
+        else
+        {
+            apply_device_mode(DEVICE_CTRL_HEATER2);
         }
     }
 
     while (auto_control_thread_running && !exit_flag)
     {
+        enforce_manual_device_modes();
+
         if (!subsys_handle)
         {
             printf("警告: 子系统不可用，等待重连...\n");
             sleep(2);
             continue;
         }
-        else
+
+        bool pump_auto = (device_modes[DEVICE_CTRL_PUMP] == DEVICE_MODE_AUTO);
+        bool pump_already_running = false;
+
+        if (pump_auto)
         {
             result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, true);
             if (result == 0)
@@ -730,45 +967,49 @@ HEATER2_RUNNING:
             }
             else
             {
-                // 获取详细错误信息
-                const char* error_info = subsys_get_last_error(subsys_handle);
+                const char *error_info = subsys_get_last_error(subsys_handle);
                 printf("错误: 气泵启动失败，错误信息: %s\n", error_info ? error_info : "未知错误");
-                
-                // 检查是否是"已在运行"错误，如果是则检查设备状态
+
                 if (error_info && strstr(error_info, "RSP_FAIL_ALREADY_RUNNING"))
                 {
-                    // 更新设备状态并检查气泵是否确实在运行
-                    if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
+                    if (get_device_info_with_filter(subsys_handle, &device_info) == 0 &&
+                        device_info.pump_status == SUBSYS_STATUS_ON)
                     {
-                        if (device_info.pump_status == SUBSYS_STATUS_ON)
-                        {
-                            printf("自动控制：气泵已在运行中，继续执行\n");
-                            gettimeofday(&last_subsys_update, NULL);
-                            goto PUMP_RUNNING; // 跳转到气泵运行逻辑
-                        }
+                        printf("自动控制：气泵已在运行中，继续执行\n");
+                        gettimeofday(&last_subsys_update, NULL);
+                        pump_already_running = true;
                     }
                 }
-                
-                error_exit = true;
-                goto EXIT;
-            }
 
-            if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
-            {
-                gettimeofday(&last_subsys_update, NULL);
+                if (!pump_already_running)
+                {
+                    error_exit = true;
+                    goto EXIT;
+                }
             }
         }
+        else
+        {
+            apply_device_mode(DEVICE_CTRL_PUMP);
+        }
 
-PUMP_RUNNING:
-        // 在间隔期间监控设备状态和执行温度控制
+        if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
+        {
+            gettimeofday(&last_subsys_update, NULL);
+        }
+
         printf("自动控制：激光关闭，等待1.5秒并监控设备状态...\n");
 
-        // 分多次小间隔等待，期间执行监控任务
         for (int i = 0; i < 3 && auto_control_thread_running && !exit_flag; i++)
         {
-            usleep(500000); // 0.5秒
+            usleep(500000);
 
-            // 获取设备状态信息
+            pump_auto = (device_modes[DEVICE_CTRL_PUMP] == DEVICE_MODE_AUTO);
+            if (!pump_auto)
+            {
+                apply_device_mode(DEVICE_CTRL_PUMP);
+            }
+
             if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
@@ -780,72 +1021,98 @@ PUMP_RUNNING:
             break;
         }
 
-        // 开启激光
-        result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, true);
-        if (result == 0)
+        bool laser_auto = (device_modes[DEVICE_CTRL_LASER] == DEVICE_MODE_AUTO);
+        if (laser_auto)
         {
-            printf("自动控制：激光开启\n");
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, true);
+            if (result == 0)
+            {
+                printf("自动控制：激光开启\n");
+            }
+            else
+            {
+                printf("警告: 激光开启失败\n");
+            }
         }
         else
         {
-            printf("警告: 激光开启失败\n");
+            apply_device_mode(DEVICE_CTRL_LASER);
         }
 
-        // 分多次小间隔等待，期间执行监控任务
         for (int i = 0; i < 3 && auto_control_thread_running && !exit_flag; i++)
         {
-            usleep(500000); // 0.5秒
+            usleep(500000);
 
-            // 获取设备状态信息
+            pump_auto = (device_modes[DEVICE_CTRL_PUMP] == DEVICE_MODE_AUTO);
+            if (!pump_auto)
+            {
+                apply_device_mode(DEVICE_CTRL_PUMP);
+            }
+
+            laser_auto = (device_modes[DEVICE_CTRL_LASER] == DEVICE_MODE_AUTO);
+            if (!laser_auto)
+            {
+                apply_device_mode(DEVICE_CTRL_LASER);
+            }
+
             if (get_device_info_with_filter(subsys_handle, &device_info) == 0)
             {
                 gettimeofday(&last_subsys_update, NULL);
             }
         }
 
-        // 关闭激光
-        result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
-        if (result == 0)
+        laser_auto = (device_modes[DEVICE_CTRL_LASER] == DEVICE_MODE_AUTO);
+        if (laser_auto)
         {
-            printf("自动控制：激光关闭\n");
+            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+            if (result == 0)
+            {
+                printf("自动控制：激光关闭\n");
+            }
+            else
+            {
+                printf("警告: 激光关闭失败\n");
+            }
         }
         else
         {
-            printf("警告: 激光关闭失败\n");
+            apply_device_mode(DEVICE_CTRL_LASER);
         }
 
-        if ((double)(device_info.temp2) > 60.0)
+        if (device_modes[DEVICE_CTRL_HEATER2] == DEVICE_MODE_AUTO)
         {
-            if (device_info.heater2_status == SUBSYS_STATUS_ON)
+            if ((double)(device_info.temp2) > 60.0 && device_info.heater2_status == SUBSYS_STATUS_ON)
             {
                 printf("警告: 加热片2温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp2));
                 subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
             }
-        }
-        else if ((double)(device_info.temp2) < 55.0)
-        {
-            if (device_info.heater2_status == SUBSYS_STATUS_OFF)
+            else if ((double)(device_info.temp2) < 55.0 && device_info.heater2_status == SUBSYS_STATUS_OFF)
             {
                 printf("警告: 加热片2温度过低（%.1f°C），正在提高功率\n", (double)(device_info.temp2));
                 subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, true);
             }
         }
-
-        if ((double)(device_info.temp1) > 35.0)
+        else
         {
-            if (device_info.heater1_status == SUBSYS_STATUS_ON)
+            apply_device_mode(DEVICE_CTRL_HEATER2);
+        }
+
+        if (device_modes[DEVICE_CTRL_HEATER1] == DEVICE_MODE_AUTO)
+        {
+            if ((double)(device_info.temp1) > 35.0 && device_info.heater1_status == SUBSYS_STATUS_ON)
             {
                 printf("警告: 加热片1温度过高（%.1f°C），正在降低功率\n", (double)(device_info.temp1));
                 subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
             }
-        }
-        else if ((double)(device_info.temp1) < 28.0)
-        {
-            if (device_info.heater1_status == SUBSYS_STATUS_OFF)
+            else if ((double)(device_info.temp1) < 28.0 && device_info.heater1_status == SUBSYS_STATUS_OFF)
             {
                 printf("警告: 加热片1温度过低（%.1f°C），正在提高功率\n", (double)(device_info.temp1));
                 subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, true);
             }
+        }
+        else
+        {
+            apply_device_mode(DEVICE_CTRL_HEATER1);
         }
     }
 
@@ -862,42 +1129,73 @@ EXIT:
             gettimeofday(&last_subsys_update, NULL);
         }
 
-        // 根据对应设备状态逐个关闭，不要在未开启状态关闭设备，可能导致复位
-        if (device_info.heater1_status == SUBSYS_STATUS_ON)
+        // 根据对应设备状态逐个关闭（仅限自动模式），手动模式保持用户设置
+        if (device_modes[DEVICE_CTRL_HEATER1] == DEVICE_MODE_AUTO)
         {
-            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
-            if (result != 0)
+            if (device_info.heater1_status == SUBSYS_STATUS_ON)
             {
-                const char* error_info = subsys_get_last_error(subsys_handle);
-                printf("警告: 关闭加热片1失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER1, false);
+                if (result != 0)
+                {
+                    const char *error_info = subsys_get_last_error(subsys_handle);
+                    printf("警告: 关闭加热片1失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                }
             }
         }
-        if (device_info.heater2_status == SUBSYS_STATUS_ON)
+        else
         {
-            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
-            if (result != 0)
+            apply_device_mode(DEVICE_CTRL_HEATER1);
+        }
+
+        if (device_modes[DEVICE_CTRL_HEATER2] == DEVICE_MODE_AUTO)
+        {
+            if (device_info.heater2_status == SUBSYS_STATUS_ON)
             {
-                const char* error_info = subsys_get_last_error(subsys_handle);
-                printf("警告: 关闭加热片2失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_HEATER2, false);
+                if (result != 0)
+                {
+                    const char *error_info = subsys_get_last_error(subsys_handle);
+                    printf("警告: 关闭加热片2失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                }
             }
         }
-        if (device_info.laser_status == SUBSYS_STATUS_ON)
+        else
         {
-            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
-            if (result != 0)
+            apply_device_mode(DEVICE_CTRL_HEATER2);
+        }
+
+        if (device_modes[DEVICE_CTRL_LASER] == DEVICE_MODE_AUTO)
+        {
+            if (device_info.laser_status == SUBSYS_STATUS_ON)
             {
-                const char* error_info = subsys_get_last_error(subsys_handle);
-                printf("警告: 关闭激光失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_LASER, false);
+                if (result != 0)
+                {
+                    const char *error_info = subsys_get_last_error(subsys_handle);
+                    printf("警告: 关闭激光失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                }
             }
         }
-        if (device_info.pump_status == SUBSYS_STATUS_ON)
+        else
         {
-            result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
-            if (result != 0)
+            apply_device_mode(DEVICE_CTRL_LASER);
+        }
+
+        if (device_modes[DEVICE_CTRL_PUMP] == DEVICE_MODE_AUTO)
+        {
+            if (device_info.pump_status == SUBSYS_STATUS_ON)
             {
-                const char* error_info = subsys_get_last_error(subsys_handle);
-                printf("警告: 关闭气泵失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                result = subsys_control_device(subsys_handle, SUBSYS_DEVICE_PUMP, false);
+                if (result != 0)
+                {
+                    const char *error_info = subsys_get_last_error(subsys_handle);
+                    printf("警告: 关闭气泵失败，错误信息: %s\n", error_info ? error_info : "未知错误");
+                }
             }
+        }
+        else
+        {
+            apply_device_mode(DEVICE_CTRL_PUMP);
         }
 
         auto_control_thread_running = 0;
@@ -2783,7 +3081,7 @@ void init_lvgl_ui(void)
 
     // 创建设置菜单面板 (初始隐藏) - 重新设计为导航式菜单
     menu_panel = lv_obj_create(scr);
-    lv_obj_set_size(menu_panel, 200, 170);
+    lv_obj_set_size(menu_panel, 220, 260);
     lv_obj_center(menu_panel);
     lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
@@ -2848,6 +3146,46 @@ void init_lvgl_ui(void)
     lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_30, 0);
     lv_obj_set_style_pad_all(menu_usb_config_btn, 4, 0);
     lv_obj_align(menu_usb_config_btn, LV_ALIGN_TOP_MID, 0, 135);
+
+    // HEATER1 选项标签
+    menu_heater1_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_heater1_btn, "  HEATER1: AUTO");
+    lv_obj_set_style_text_color(menu_heater1_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_heater1_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_heater1_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_heater1_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_heater1_btn, 4, 0);
+    lv_obj_align(menu_heater1_btn, LV_ALIGN_TOP_MID, 0, 160);
+
+    // HEATER2 选项标签
+    menu_heater2_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_heater2_btn, "  HEATER2: AUTO");
+    lv_obj_set_style_text_color(menu_heater2_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_heater2_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_heater2_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_heater2_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_heater2_btn, 4, 0);
+    lv_obj_align(menu_heater2_btn, LV_ALIGN_TOP_MID, 0, 185);
+
+    // PUMP 选项标签
+    menu_pump_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_pump_btn, "  PUMP: AUTO");
+    lv_obj_set_style_text_color(menu_pump_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_pump_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_pump_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_pump_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_pump_btn, 4, 0);
+    lv_obj_align(menu_pump_btn, LV_ALIGN_TOP_MID, 0, 210);
+
+    // LASER 选项标签
+    menu_laser_btn = lv_label_create(menu_panel);
+    lv_label_set_text(menu_laser_btn, "  LASER: AUTO");
+    lv_obj_set_style_text_color(menu_laser_btn, lv_color_white(), 0);
+    lv_obj_set_style_text_font(menu_laser_btn, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(menu_laser_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_laser_btn, LV_OPA_30, 0);
+    lv_obj_set_style_pad_all(menu_laser_btn, 4, 0);
+    lv_obj_align(menu_laser_btn, LV_ALIGN_TOP_MID, 0, 235);
 
     // 创建子系统状态面板 (屏幕底部)
     subsys_panel = lv_obj_create(scr);
@@ -3330,6 +3668,8 @@ int main(int argc, char *argv[])
             if (subsys_handle) {
                 get_device_info_with_filter(subsys_handle, &device_info);
             }
+
+            enforce_manual_device_modes();
             
             update_subsys_status_display();
             
@@ -3682,7 +4022,8 @@ void hide_settings_menu(void)
  */
 void update_menu_selection(void)
 {
-    if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn || !menu_usb_config_btn)
+    if (!menu_visible || !menu_tcp_btn || !menu_display_btn || !menu_exposure_btn || !menu_gain_btn || !menu_usb_config_btn ||
+        !menu_heater1_btn || !menu_heater2_btn || !menu_pump_btn || !menu_laser_btn)
         return;
 
     // 重置所有选项的背景
@@ -3696,6 +4037,14 @@ void update_menu_selection(void)
     lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_30, 0);
     lv_obj_set_style_bg_color(menu_usb_config_btn, lv_color_make(20, 20, 20), 0);
     lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_heater1_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_heater1_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_heater2_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_heater2_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_pump_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_pump_btn, LV_OPA_30, 0);
+    lv_obj_set_style_bg_color(menu_laser_btn, lv_color_make(20, 20, 20), 0);
+    lv_obj_set_style_bg_opa(menu_laser_btn, LV_OPA_30, 0);
 
     // 更新文本内容
     char tcp_text[32];
@@ -3703,6 +4052,10 @@ void update_menu_selection(void)
     char exposure_text[32];
     char gain_text[32];
     char usb_text[32];
+    char heater1_text[40];
+    char heater2_text[40];
+    char pump_text[32];
+    char laser_text[32];
 
     // TCP状态根据USB模式动态显示
     if (is_tcp_available())
@@ -3718,17 +4071,25 @@ void update_menu_selection(void)
     snprintf(exposure_text, sizeof(exposure_text), "  EXPOSURE: %d", current_exposure);
     snprintf(gain_text, sizeof(gain_text), "  GAIN: %d", current_gain);
     snprintf(usb_text, sizeof(usb_text), "  USB: %s", get_usb_mode_name(get_usb_mode()));
+    snprintf(heater1_text, sizeof(heater1_text), "  HEATER1: %s", device_mode_to_string(device_modes[DEVICE_CTRL_HEATER1]));
+    snprintf(heater2_text, sizeof(heater2_text), "  HEATER2: %s", device_mode_to_string(device_modes[DEVICE_CTRL_HEATER2]));
+    snprintf(pump_text, sizeof(pump_text), "  PUMP: %s", device_mode_to_string(device_modes[DEVICE_CTRL_PUMP]));
+    snprintf(laser_text, sizeof(laser_text), "  LASER: %s", device_mode_to_string(device_modes[DEVICE_CTRL_LASER]));
 
     lv_label_set_text(menu_tcp_btn, tcp_text);
     lv_label_set_text(menu_display_btn, display_text);
     lv_label_set_text(menu_exposure_btn, exposure_text);
     lv_label_set_text(menu_gain_btn, gain_text);
     lv_label_set_text(menu_usb_config_btn, usb_text);
+    lv_label_set_text(menu_heater1_btn, heater1_text);
+    lv_label_set_text(menu_heater2_btn, heater2_text);
+    lv_label_set_text(menu_pump_btn, pump_text);
+    lv_label_set_text(menu_laser_btn, laser_text);
 
     // 高亮当前选择的项目
     switch (menu_selected_item)
     {
-    case 0: // TCP
+    case MENU_ITEM_TCP: // TCP
         lv_obj_set_style_bg_color(menu_tcp_btn, lv_color_make(60, 60, 60), 0);
         lv_obj_set_style_bg_opa(menu_tcp_btn, LV_OPA_70, 0);
         if (is_tcp_available())
@@ -3741,13 +4102,13 @@ void update_menu_selection(void)
         }
         lv_label_set_text(menu_tcp_btn, tcp_text);
         break;
-    case 1: // DISPLAY
+    case MENU_ITEM_DISPLAY: // DISPLAY
         lv_obj_set_style_bg_color(menu_display_btn, lv_color_make(60, 60, 60), 0);
         lv_obj_set_style_bg_opa(menu_display_btn, LV_OPA_70, 0);
         snprintf(display_text, sizeof(display_text), "> DISPLAY: %s", display_enabled ? "ON" : "OFF");
         lv_label_set_text(menu_display_btn, display_text);
         break;
-    case 2: // EXPOSURE
+    case MENU_ITEM_EXPOSURE: // EXPOSURE
         lv_obj_set_style_bg_color(menu_exposure_btn, lv_color_make(60, 60, 60), 0);
         lv_obj_set_style_bg_opa(menu_exposure_btn, LV_OPA_70, 0);
         if (in_adjustment_mode && adjustment_type == 0)
@@ -3760,7 +4121,7 @@ void update_menu_selection(void)
         }
         lv_label_set_text(menu_exposure_btn, exposure_text);
         break;
-    case 3: // GAIN
+    case MENU_ITEM_GAIN: // GAIN
         lv_obj_set_style_bg_color(menu_gain_btn, lv_color_make(60, 60, 60), 0);
         lv_obj_set_style_bg_opa(menu_gain_btn, LV_OPA_70, 0);
         if (in_adjustment_mode && adjustment_type == 1)
@@ -3773,11 +4134,35 @@ void update_menu_selection(void)
         }
         lv_label_set_text(menu_gain_btn, gain_text);
         break;
-    case 4: // USB CONFIG
+    case MENU_ITEM_USB: // USB CONFIG
         lv_obj_set_style_bg_color(menu_usb_config_btn, lv_color_make(60, 60, 60), 0);
         lv_obj_set_style_bg_opa(menu_usb_config_btn, LV_OPA_70, 0);
         snprintf(usb_text, sizeof(usb_text), "> USB: %s", get_usb_mode_name(get_usb_mode()));
         lv_label_set_text(menu_usb_config_btn, usb_text);
+        break;
+    case MENU_ITEM_HEATER1:
+        lv_obj_set_style_bg_color(menu_heater1_btn, lv_color_make(60, 60, 60), 0);
+        lv_obj_set_style_bg_opa(menu_heater1_btn, LV_OPA_70, 0);
+        snprintf(heater1_text, sizeof(heater1_text), "> HEATER1: %s", device_mode_to_string(device_modes[DEVICE_CTRL_HEATER1]));
+        lv_label_set_text(menu_heater1_btn, heater1_text);
+        break;
+    case MENU_ITEM_HEATER2:
+        lv_obj_set_style_bg_color(menu_heater2_btn, lv_color_make(60, 60, 60), 0);
+        lv_obj_set_style_bg_opa(menu_heater2_btn, LV_OPA_70, 0);
+        snprintf(heater2_text, sizeof(heater2_text), "> HEATER2: %s", device_mode_to_string(device_modes[DEVICE_CTRL_HEATER2]));
+        lv_label_set_text(menu_heater2_btn, heater2_text);
+        break;
+    case MENU_ITEM_PUMP:
+        lv_obj_set_style_bg_color(menu_pump_btn, lv_color_make(60, 60, 60), 0);
+        lv_obj_set_style_bg_opa(menu_pump_btn, LV_OPA_70, 0);
+        snprintf(pump_text, sizeof(pump_text), "> PUMP: %s", device_mode_to_string(device_modes[DEVICE_CTRL_PUMP]));
+        lv_label_set_text(menu_pump_btn, pump_text);
+        break;
+    case MENU_ITEM_LASER:
+        lv_obj_set_style_bg_color(menu_laser_btn, lv_color_make(60, 60, 60), 0);
+        lv_obj_set_style_bg_opa(menu_laser_btn, LV_OPA_70, 0);
+        snprintf(laser_text, sizeof(laser_text), "> LASER: %s", device_mode_to_string(device_modes[DEVICE_CTRL_LASER]));
+        lv_label_set_text(menu_laser_btn, laser_text);
         break;
     }
 }
@@ -3808,7 +4193,7 @@ void menu_navigate_up(void)
         menu_selected_item--;
         if (menu_selected_item < 0)
         {
-            menu_selected_item = 4; // 循环到最后一项 (USB_CONFIG)
+            menu_selected_item = MENU_ITEM_COUNT - 1;
         }
         update_menu_selection();
         printf("Menu navigation UP, selected item: %d\n", menu_selected_item);
@@ -3839,9 +4224,9 @@ void menu_navigate_down(void)
     {
         // 普通导航模式
         menu_selected_item++;
-        if (menu_selected_item > 4)
+        if (menu_selected_item >= MENU_ITEM_COUNT)
         {
-            menu_selected_item = 0; // 循环到第一项 (TCP)
+            menu_selected_item = 0;
         }
         update_menu_selection();
         printf("Menu navigation DOWN, selected item: %d\n", menu_selected_item);
@@ -3858,7 +4243,7 @@ void menu_confirm_selection(void)
 
     switch (menu_selected_item)
     {
-    case 0: // TCP 选项
+    case MENU_ITEM_TCP: // TCP 选项
         // 检查TCP是否可用（只有RNDIS模式下才可用）
         if (!is_tcp_available() && !tcp_enabled)
         {
@@ -3946,7 +4331,7 @@ void menu_confirm_selection(void)
         }
         break;
 
-    case 1: // DISPLAY 选项
+    case MENU_ITEM_DISPLAY: // DISPLAY 选项
         display_enabled = !display_enabled;
         printf("Menu: Display %s (camera continues running)\n",
                display_enabled ? "ENABLED" : "DISABLED");
@@ -3995,7 +4380,7 @@ void menu_confirm_selection(void)
         }
         break;
 
-    case 2: // EXPOSURE 选项
+    case MENU_ITEM_EXPOSURE: // EXPOSURE 选项
         if (in_adjustment_mode && adjustment_type == 0)
         {
             // 退出调整模式
@@ -4011,7 +4396,7 @@ void menu_confirm_selection(void)
         }
         break;
 
-    case 3: // GAIN 选项
+    case MENU_ITEM_GAIN: // GAIN 选项
         if (in_adjustment_mode && adjustment_type == 1)
         {
             // 退出调整模式
@@ -4027,7 +4412,7 @@ void menu_confirm_selection(void)
         }
         break;
 
-    case 4: // USB CONFIG 选项
+    case MENU_ITEM_USB: // USB CONFIG 选项
     {
         usb_mode_t current_mode = get_usb_mode();
         usb_mode_t next_mode = get_next_usb_mode(current_mode);
@@ -4052,6 +4437,22 @@ void menu_confirm_selection(void)
         }
     }
     break;
+
+    case MENU_ITEM_HEATER1:
+        cycle_device_mode(DEVICE_CTRL_HEATER1);
+        break;
+
+    case MENU_ITEM_HEATER2:
+        cycle_device_mode(DEVICE_CTRL_HEATER2);
+        break;
+
+    case MENU_ITEM_PUMP:
+        cycle_device_mode(DEVICE_CTRL_PUMP);
+        break;
+
+    case MENU_ITEM_LASER:
+        cycle_device_mode(DEVICE_CTRL_LASER);
+        break;
     }
 
     // 更新菜单显示
@@ -4068,7 +4469,7 @@ void menu_confirm_selection(void)
  */
 void menu_exposure_event_cb(lv_event_t *e)
 {
-    if (menu_visible && menu_selected_item == 0)
+    if (menu_visible && menu_selected_item == MENU_ITEM_TCP)
     {
         // 暂时禁用曝光调节，避免与其他操作冲突
         printf("Exposure adjustment temporarily disabled in menu\n");
@@ -4089,7 +4490,7 @@ void menu_exposure_event_cb(lv_event_t *e)
  */
 void menu_gain_event_cb(lv_event_t *e)
 {
-    if (menu_visible && menu_selected_item == 0)
+    if (menu_visible && menu_selected_item == MENU_ITEM_TCP)
     {
         // 暂时禁用增益调节，避免与其他操作冲突
         printf("Gain adjustment temporarily disabled in menu\n");
