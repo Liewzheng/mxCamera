@@ -2667,7 +2667,7 @@ void handle_keys(void)
     static struct timeval key_x_press_start = {0};
     static bool key_x_long_press_triggered = false;
     
-    const int debounce_threshold = 3;
+    const int debounce_threshold = 1;
 
     // 限制按键检查频率
     struct timeval current_time;
@@ -3082,7 +3082,7 @@ void init_lvgl_ui(void)
 
     // 创建设置菜单面板 (初始隐藏) - 重新设计为固定尺寸带滚动的导航菜单
     menu_panel = lv_obj_create(scr);
-    lv_obj_set_size(menu_panel, 200, 200);
+    lv_obj_set_size(menu_panel, 200, 180);
     lv_obj_center(menu_panel);
     lv_obj_set_style_bg_color(menu_panel, lv_color_make(40, 40, 40), 0);
     lv_obj_set_style_bg_opa(menu_panel, LV_OPA_90, 0);
